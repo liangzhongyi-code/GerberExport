@@ -1,0 +1,17 @@
+# 預設：版本庫內一律 LF
+* text=auto eol=lf
+
+# 批次檔必須是 CRLF。
+# cmd.exe 對純 LF 的 .bat 在多行結構上有已知問題，且 tests/test_bat_wrapper.py
+# 會斷言 CRLF——沒有這條規則，clone 到 Windows 以外的環境再推回來就會壞掉。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 交付給使用者的說明文字，用 Windows 記事本開，維持 CRLF
+*.txt text eol=crlf
+
+# 二進位，不做任何換行處理
+*.whl binary
+*.zip binary
+*.png binary
+*.pyc binary

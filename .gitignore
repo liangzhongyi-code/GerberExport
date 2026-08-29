@@ -1,0 +1,26 @@
+﻿# 探測產出（含目標機的 UI 結構，每次執行不同）
+scripts/probe-output/
+
+# 執行期產物
+scripts/_log/
+scripts/state.json
+*.log
+
+# 使用者自訂設定（config.json 本體進版控作為範本）
+scripts/config.local.json
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# \u96e2\u7dda\u5b89\u88dd\u5957\u4ef6\uff08\u53ef\u7528 pip download \u91cd\u65b0\u7522\u751f\uff0c\u4e0d\u9032\u7248\u63a7\uff09
+wheels/
+
+# \u4ea4\u4ed8\u5305（每次重新產生）
+_deliver_stage/
+*.zip
+
+# Windows
+Thumbs.db
+desktop.ini

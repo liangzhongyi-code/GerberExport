@@ -32,14 +32,48 @@ MAX_CANDIDATES = 40
 # ── 純函式 ───────────────────────────────────────────────────────────
 
 
-def report_path(out_dir: Path, mode: str, when: datetime) -> Path:
+_UNSAFE_LABEL = re.compile(r'[^0-9A-Za-z_\-]')
+
+
+def sanitize_label(label: str) -> str:
     """
-    報告檔名帶模式與時間戳。
+    標籤會直接進檔名，而它來自命令列——可能被打成路徑，也可能含
+    Windows 存不了的字元。
+
+    不清洗的話報告會落在 probe-output\\ 外面，而使用者照著指示複製整個
+    資料夾時就少帶了一份，且畫面上不會有任何異狀。
+    """
+    return _UNSAFE_LABEL.sub("", label or "")
+
+
+def _stamped(mode: str, when: datetime, label: str) -> str:
+    tag = sanitize_label(label)
+    prefix = "%s_%s" % (mode, tag) if tag else mode
+    return "%s_%s" % (prefix, when.strftime("%y%m%d_%H%M%S"))
+
+
+def report_path(out_dir: Path, mode: str, when: datetime, label: str = "") -> Path:
+    """
+    報告檔名帶模式、標籤與時間戳。
 
     模式要進檔名：主視窗與對話框是分兩次探測的，同名會讓第二次蓋掉第一次，
     而使用者要把兩份都帶回來。
+
+    標籤要進檔名：期二有三種格式，dialog 模式會被跑三次，而三份報告拿回來
+    之後必須分辨得出哪一份對應哪一種格式——那是它們唯一的用途。靠時間順序
+    推斷不行，某一種很可能重跑過。
     """
-    return Path(out_dir) / ("probe_%s_%s.json" % (mode, when.strftime("%y%m%d_%H%M%S")))
+    return Path(out_dir) / ("probe_%s.json" % _stamped(mode, when, label))
+
+
+def transcript_path(out_dir: Path, mode: str, when: datetime, label: str = "") -> Path:
+    """
+    畫面記錄的落點。
+
+    刻意不叫 probe_*.json：探測失敗時不產生報告，但**會**留下畫面記錄，
+    兩者混在同一個命名底下的話，那份記錄會被當成報告讀進來。
+    """
+    return Path(out_dir) / ("畫面記錄_%s.txt" % _stamped(mode, when, label))
 
 
 def default_output_dir() -> Path:
@@ -207,6 +241,11 @@ def parse_args(argv: Optional[Sequence[str]] = None):
     )
     parser.add_argument("--class-name", default=None, help="視窗類別名稱（選用）")
     parser.add_argument(
+        "--label",
+        default="",
+        help="標籤，會寫進檔名。三種匯出格式各探一次時用來分辨（如 aama、astm）",
+    )
+    parser.add_argument(
         "--max-depth",
         type=int,
         default=uia.DEFAULT_MAX_DEPTH,
@@ -228,11 +267,63 @@ def run(
     now: Callable[[], datetime],
     echo: Callable[[str], None],
     title_pattern: str = "",
+    label: str = "",
+    transcript_fn: Optional[Callable[[Path, str], None]] = None,
 ) -> int:
     """
-    跑一次探測，回傳結束碼。
+    跑一次探測，並把畫面內容一併存成檔案。
 
-    任何失敗都走同一條路：印出人看得懂的說明、回非零、**不寫任何檔案**。
+    時間戳只取一次：報告與畫面記錄要落在同一個時間戳底下，否則兩份檔案
+    對不起來，收回來時得靠猜。
+    """
+    stamp = now()
+    lines: list = []
+
+    def tee(line: str) -> None:
+        echo(line)
+        lines.append(line)
+
+    try:
+        return _run(
+            mode=mode,
+            out_dir=out_dir,
+            probe_fn=probe_fn,
+            list_windows_fn=list_windows_fn,
+            write_fn=write_fn,
+            stamp=stamp,
+            echo=tee,
+            title_pattern=title_pattern,
+            label=label,
+        )
+    finally:
+        # 失敗時沒有報告，畫面上的錯誤訊息與候選視窗清單就是唯一線索——
+        # 所以這件事放在 finally，不論走哪條路都要留下記錄。
+        if transcript_fn is not None:
+            try:
+                transcript_fn(
+                    transcript_path(out_dir, mode, stamp, label),
+                    "\n".join(lines) + "\n",
+                )
+            except Exception:  # noqa: BLE001 — 輔助功能，壞掉不該改變探測結果
+                pass
+
+
+def _run(
+    *,
+    mode: str,
+    out_dir: Path,
+    probe_fn: Callable[[], "uia.ProbeReport"],
+    list_windows_fn: Callable[[], Iterable[str]],
+    write_fn: Callable[[Path, str], None],
+    stamp: datetime,
+    echo: Callable[[str], None],
+    title_pattern: str,
+    label: str,
+) -> int:
+    """
+    探測本身。
+
+    任何失敗都走同一條路：印出人看得懂的說明、回非零、**不寫報告檔**。
     """
     try:
         report, selection_candidates = probe_fn()
@@ -257,7 +348,7 @@ def run(
         echo("請把這整個畫面回報，這通常表示 AccuMark 的介面與預期不同。")
         return 4
 
-    path = report_path(out_dir, mode, now())
+    path = report_path(out_dir, mode, stamp, label)
     data = uia.report_to_dict(report)
     # 完整候選清單也寫進報告：摘要只印得下重點，但後續要據此填
     # config.controls.model_list，需要每個候選的完整路徑。
@@ -352,6 +443,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         now=datetime.now,
         echo=print,
         title_pattern=args.title,
+        label=args.label,
+        transcript_fn=_write,
     )
 
 

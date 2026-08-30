@@ -717,7 +717,27 @@ def find_window(
 SELECTION_CONTROL_TYPES = ("List", "DataGrid", "Table", "Tree", "ListView")
 
 
-def find_foreground_window(backend: str = BACKEND):
+def foreground_handle() -> int:
+    """
+    目前最前面那個視窗的控制代碼。
+
+    直接問 user32，不走 pywinauto 的內部模組——原本這裡用的是
+    `pywinauto.win32functions.GetForegroundWindow`，而 0.6.9 裡**沒有**
+    這個屬性（實測 AttributeError）。四支對話框探測腳本全部走這條路，
+    等於整個交付點 1 的主要內容在目標機上跑不起來。
+
+    屬性是執行期才解析的，靜態掃描看不到；把 pywinauto 換成假物件也測
+    不到——假物件有沒有這個屬性都不代表真的那個有。所以改用一個不會變
+    的東西：GetForegroundWindow 是 Win32 API 的一部分，比任何套件穩定。
+
+    鎖屏或切換桌面時會回 0，呼叫端要當成「抓不到」。
+    """
+    import ctypes  # noqa: PLC0415
+
+    return int(ctypes.windll.user32.GetForegroundWindow())
+
+
+def find_foreground_window(backend: str = BACKEND, handle_fn=None):
     """
     不純：抓目前最前面的那個視窗。
 
@@ -726,20 +746,19 @@ def find_foreground_window(backend: str = BACKEND):
     剛剛開啟的匯出對話框，而報告看起來完全正常。
 
     使用者被指示「先把對話框開起來再跑」，所以前景視窗就是它。
+
+    handle_fn 可注入，讓「抓不到前景視窗」這條錯誤路徑不必真的去弄掉
+    桌面上的視窗才測得到。
     """
     pywinauto = _load_pywinauto()
+    get_handle = handle_fn or foreground_handle
+    handle = get_handle()
+    if not handle:
+        raise WindowNotFoundError(
+            "抓不到前景視窗，請確認對話框開著且停在最上層"
+        )
     try:
-        from pywinauto import win32functions, findwindows  # noqa: PLC0415
-
-        handle = win32functions.GetForegroundWindow()
-        if not handle:
-            raise WindowNotFoundError("抓不到前景視窗，請確認對話框開著且在最上層")
-        element = findwindows.find_element(handle=handle)
-        return pywinauto.Desktop(backend=backend).window(
-            handle=element.handle
-        ).wrapper_object()
-    except WindowNotFoundError:
-        raise
+        return pywinauto.Desktop(backend=backend).window(handle=handle).wrapper_object()
     except Exception as exc:  # noqa: BLE001
         raise WindowNotFoundError(
             f"抓不到前景視窗：{exc}。請先把匯出對話框開起來，讓它停在最上層"

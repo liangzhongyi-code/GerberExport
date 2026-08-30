@@ -11,14 +11,26 @@ import pytest
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 
+# 對話框探測 .bat → 它該帶的標籤。
+#
+# 三種匯出格式的對話框長得不一樣，要分開探。四支是同一個骨架複製出來的，
+# 而複製時最容易漏掉的就是改標籤——漏了的話兩份報告會落在同一個檔名上，
+# 後一次靜靜蓋掉前一次，畫面上完全看不出異狀。
+DIALOG_LABELS = {
+    "2a_探測_AccuMark壓縮檔對話框.bat": "zip",
+    "2b_探測_AAMA對話框.bat": "aama",
+    "2c_探測_ASTM對話框.bat": "astm",
+    "2d_探測_其他跳出視窗.bat": "other",
+}
+
 # .bat 檔名 → 它應該呼叫的 Python 腳本
 BAT_TARGETS = {
     "0_檢查環境.bat": "check_env.py",
     "1_執行探測.bat": "probe_ui.py",
-    "2_執行探測_對話框.bat": "probe_ui.py",
     "3_執行批次匯出.bat": "batch_export.py",
     "4_強制全部重跑.bat": "batch_export.py",
 }
+BAT_TARGETS.update({name: "probe_ui.py" for name in DIALOG_LABELS})
 ALL_BATS = sorted(BAT_TARGETS)
 
 
@@ -131,8 +143,27 @@ def test_echo_off_and_setlocal(name):
 # ── 各 .bat 專屬參數 ─────────────────────────────────────────────────
 
 
-def test_dialog_probe_passes_mode_flag():
-    assert "--mode dialog" in read_text("2_執行探測_對話框.bat")
+@pytest.mark.parametrize("name", sorted(DIALOG_LABELS))
+def test_dialog_probe_passes_mode_flag(name):
+    assert "--mode dialog" in read_text(name)
+
+
+@pytest.mark.parametrize("name", sorted(DIALOG_LABELS))
+def test_dialog_probe_passes_its_own_label(name):
+    assert "--label %s" % DIALOG_LABELS[name] in read_text(name), (
+        "%s 沒有帶對標籤，報告檔名會跟別的格式撞在一起" % name
+    )
+
+
+def test_no_two_dialog_bats_share_a_label():
+    """
+    複製骨架時漏改標籤的話，兩份報告會落在同一個檔名上而互相覆蓋。
+    使用者以為四份都帶回來了，實際上少一份，且畫面上沒有任何提示。
+    """
+    labels = [
+        read_text(name).split("--label ")[1].split()[0] for name in sorted(DIALOG_LABELS)
+    ]
+    assert len(set(labels)) == len(labels), "有兩支對話框探測共用同一個標籤：%s" % labels
 
 
 def test_force_rerun_passes_force_flag():

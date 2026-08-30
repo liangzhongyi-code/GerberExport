@@ -336,7 +336,10 @@ A 的致命處在於失敗是靜默的：使用者會拿到 11 個檔案卻以�
 ```
 0_檢查環境.bat              → check_env.py
 1_執行探測.bat              → probe_ui.py
-2_執行探測_對話框.bat        → probe_ui.py --mode dialog
+2a_探測_AccuMark壓縮檔對話框.bat → probe_ui.py --mode dialog --label zip
+2b_探測_AAMA對話框.bat       → probe_ui.py --mode dialog --label aama
+2c_探測_ASTM對話框.bat       → probe_ui.py --mode dialog --label astm
+2d_探測_其他跳出視窗.bat     → probe_ui.py --mode dialog --label other
 3_執行批次匯出.bat           → batch_export.py
 4_強制全部重跑.bat           → batch_export.py --force
 ```
@@ -502,9 +505,12 @@ AccuMark 匯出的檔名依版片編號產生。初版採取防禦姿態，對�
 ```
 accumark-batch-export\
 ├── scripts\
-│   ├── 0_檢查環境.bat             ← 使用者只碰這五個
+│   ├── 0_檢查環境.bat             ← 使用者只碰這八個
 │   ├── 1_執行探測.bat
-│   ├── 2_執行探測_對話框.bat
+│   ├── 2a_探測_AccuMark壓縮檔對話框.bat
+│   ├── 2b_探測_AAMA對話框.bat
+│   ├── 2c_探測_ASTM對話框.bat
+│   ├── 2d_探測_其他跳出視窗.bat
 │   ├── 3_執行批次匯出.bat
 │   ├── 4_強制全部重跑.bat
 │   ├── check_env.py              # 期零：Python / pywinauto 驗證

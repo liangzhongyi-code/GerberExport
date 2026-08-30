@@ -414,3 +414,127 @@ def test_title_can_be_overridden():
 
 def test_max_depth_can_be_limited():
     assert probe_ui.parse_args(["--max-depth", "3"]).max_depth == 3
+
+
+# ── 標籤：三個對話框要能分辨 ─────────────────────────────────────────
+#
+# 期二要做三種格式（AccuMark ZIP、AAMA、ASTM），三個匯出對話框各不相同，
+# 所以 dialog 模式會被跑三次。原本檔名只有 mode + 時間戳，三份報告拿回來
+# 之後**無法分辨哪一份對應哪一種格式**——而那正是它們唯一的用途。
+#
+# 靠時間順序推斷不行：使用者很可能某一種重跑了兩次。
+
+
+def test_label_appears_in_filename():
+    p = probe_ui.report_path(Path("out"), "dialog", WHEN, label="aama")
+    assert "aama" in p.name
+
+
+def test_label_is_optional_and_keeps_the_old_name():
+    """沒給標籤時維持原本的檔名，既有指示與文件不會失效。"""
+    p = probe_ui.report_path(Path("out"), "window", WHEN)
+    assert p.name == "probe_window_260830_143000.json"
+
+
+def test_different_labels_do_not_collide_in_the_same_second():
+    """
+    三個對話框可能在同一秒內連續探測完（對方照著 .bat 一個接一個點）。
+    只靠時間戳的話後面兩份會靜靜覆蓋前面，而畫面上不會有任何異狀。
+    """
+    a = probe_ui.report_path(Path("out"), "dialog", WHEN, label="aama")
+    b = probe_ui.report_path(Path("out"), "dialog", WHEN, label="astm")
+    assert a != b
+
+
+def test_label_cannot_escape_the_output_folder():
+    """
+    標籤會進檔名。它來自命令列，可能被打成路徑——不清洗的話報告會落在
+    輸出資料夾外面，使用者照著指示複製 probe-output\\ 就少帶了一份。
+    """
+    p = probe_ui.report_path(Path("out"), "dialog", WHEN, label="../../偷跑")
+    assert p.parent == Path("out")
+    assert ".." not in p.name
+
+
+def test_label_drops_characters_windows_cannot_store():
+    p = probe_ui.report_path(Path("out"), "dialog", WHEN, label='a:b*c?d"e')
+    for ch in ':*?"':
+        assert ch not in p.name
+
+
+def test_label_that_is_entirely_illegal_falls_back_to_no_label():
+    """清洗完變空字串時要退回無標籤，而不是產生 probe_dialog__260830.json。"""
+    p = probe_ui.report_path(Path("out"), "dialog", WHEN, label="///")
+    assert "__" not in p.name
+
+
+def test_label_flag_is_parsed():
+    assert probe_ui.parse_args(["--label", "astm"]).label == "astm"
+
+
+def test_label_defaults_to_empty():
+    assert probe_ui.parse_args([]).label == ""
+
+
+# ── 畫面記錄：失敗時才最需要 ─────────────────────────────────────────
+#
+# 摘要裡最關鍵的一行（「選取狀態可讀取」）只出現在畫面上。原本的指示是
+# 「順便把畫面內容也回報」——那要對方截圖或全選複製主控台，而失敗時畫面
+# 上的錯誤訊息與候選視窗清單，恰恰是我這邊唯一能據以判斷的東西。
+#
+# 存成檔案之後，回收動作統一成「複製 probe-output\\ 整個資料夾」一句話。
+
+
+def run_with_transcript(**kw):
+    transcripts = {}
+    kw.setdefault("transcript_fn", lambda path, text: transcripts.update({Path(path): text}))
+    code, printed, written = run(**kw)
+    return code, printed, written, transcripts
+
+
+def test_transcript_is_written_on_success():
+    code, printed, written, transcripts = run_with_transcript()
+    assert len(transcripts) == 1
+
+
+def test_transcript_contains_the_whole_screen():
+    code, printed, written, transcripts = run_with_transcript()
+    body = list(transcripts.values())[0]
+    for line in printed:
+        assert line in body
+
+
+def test_transcript_is_written_even_when_nothing_was_found():
+    """
+    這是它存在的主要理由：探測失敗時沒有 JSON，畫面上的候選視窗清單
+    是我唯一能拿來判斷正確標題的線索。
+    """
+    code, printed, written, transcripts = run_with_transcript(
+        probe_fn=boom_not_found,
+        list_windows_fn=lambda: ("AccuMark Explorer", "記事本"),
+    )
+    assert written == {}, "失敗時仍不該產生報告檔"
+    assert len(transcripts) == 1
+    assert "AccuMark Explorer" in list(transcripts.values())[0]
+
+
+def test_transcript_is_not_named_like_a_report():
+    """
+    畫面記錄不是探測報告。取成 probe_*.json 的話，失敗時留下的那份
+    會被當成報告讀進來——正是「絕不產生誤導性報告」要防的事。
+    """
+    code, printed, written, transcripts = run_with_transcript()
+    name = list(transcripts)[0].name
+    assert not name.startswith("probe_")
+    assert not name.endswith(".json")
+
+
+def test_transcript_failure_does_not_break_the_run():
+    """存畫面記錄是輔助功能，它壞掉不該讓已經成功的探測變成失敗。"""
+
+    def broken(path, text):
+        raise OSError("磁碟滿了")
+
+    code, printed, written = run(transcript_fn=broken)
+    assert code == 0
+    assert len(written) == 1

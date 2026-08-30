@@ -42,8 +42,9 @@ def main() -> int:
     print("流程順序：")
     print("  1. 0_檢查環境.bat      確認 pywinauto 可用      ← 現在在這")
     print("  2. 1_執行探測.bat      dump AccuMark UI 結構")
-    print("  3. 2_執行探測_對話框.bat")
-    print("  4. 3_執行批次匯出.bat  （本腳本）")
+    print("  3. 2a／2b／2c           三種匯出對話框各探一次")
+    print("  4. 回報表_請填寫.txt   操作流程與產出檔案（UI 樹裡沒有）")
+    print("  5. 3_執行批次匯出.bat  （本腳本）")
     print()
     print(
         "（本次收到的參數 --only=%s --format=%s --force=%s，之後會用到）"

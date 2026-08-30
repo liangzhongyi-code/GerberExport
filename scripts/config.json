@@ -1,0 +1,54 @@
+{
+  "_說明": "AccuMark 批次匯出設定。以底線開頭的欄位是註解，程式會忽略。修改後直接存檔即可，不用重開任何東西。",
+
+  "_models": "要處理哪些 model。\"SELECTED\" = 處理你在 AccuMark Explorer 中框選的項目（推薦，設定檔完全不用維護）。也可以改成明確清單，例如 [\"A-1234\", \"A-1235\"]。",
+  "models": "SELECTED",
+
+  "_formats": "要匯出哪些格式。可用：ZIP（AccuMark 版型包）、AAMA、ASTM。不要重複。",
+  "formats": ["ZIP", "AAMA", "ASTM"],
+
+  "paths": {
+    "_說明": "temp_dir 是匯出的落點，每次匯出完會立刻搬空；output_root 是歸檔目的地。兩者不能相同。",
+    "temp_dir": "%USERPROFILE%\\Desktop\\_accumark_temp",
+    "output_root": "%USERPROFILE%\\Desktop\\AccuMark匯出"
+  },
+
+  "detection": {
+    "_說明": "怎麼判斷一次匯出真的結束了。不用固定等待秒數，而是看檔案大小是否穩定下來。裁片多的 model 匯出久一點也不會被誤判失敗。",
+    "_poll_interval_ms": "每隔幾毫秒看一次暫存夾。",
+    "poll_interval_ms": 500,
+    "_stable_samples": "連續幾次大小不變才算寫完。至少 2，調高會更保險但每次多等一點。",
+    "stable_samples": 3,
+    "_timeout_sec": "等多久還沒出現檔案就判定這次匯出失敗，跳過並繼續下一個。",
+    "timeout_sec": 300,
+    "_verify_exclusive_lock": "額外用獨佔開檔再確認一次。預設關閉，需在目標機實測確認不會干擾 AccuMark 寫檔後才建議開啟。",
+    "verify_exclusive_lock": false
+  },
+
+  "archival": {
+    "_說明": "歸檔行為。預設保留 AccuMark 的原始檔名，只有在目的地真的已經有同名檔時才會加上 _AAMA / _ASTM 這類字尾，並在日誌記一筆 WARN。",
+    "_add_format_suffix": "設為 true 則不論是否衝突都一律加格式後綴。",
+    "add_format_suffix": false,
+    "_output_dir_pattern": "輸出資料夾命名。{root} 是上面的 output_root，{yymmdd} 與 {HHMM} 是執行當下的日期時間。",
+    "output_dir_pattern": "{root}_{yymmdd}_{HHMM}"
+  },
+
+  "_dialog_whitelist": "遇到彈出視窗時的處置規則。清單裡沒列到的視窗一律停機並記錄，絕不亂按——盲目按 Enter 可能誤觸「是，覆蓋」而永久毀掉檔案。action 只接受 Cancel / Close / No 這類不會造成變更的動作。",
+  "dialog_whitelist": [
+    {
+      "title_like": "*已存在*",
+      "action": "Cancel",
+      "result_status": "FAILED_TARGET_EXISTS"
+    }
+  ],
+
+  "controls": {
+    "_說明": "AccuMark 介面上各個控制項的定位方式。期一探測（1_執行探測.bat）完成後才會填入，在那之前 value 保持空字串。strategy 可用 auto_id / name / index。",
+    "model_list": { "strategy": "auto_id", "value": "" },
+    "export_zip": { "strategy": "name", "value": "" },
+    "export_aama": { "strategy": "name", "value": "" },
+    "export_astm": { "strategy": "name", "value": "" },
+    "dialog_path_box": { "strategy": "auto_id", "value": "" },
+    "dialog_ok_button": { "strategy": "name", "value": "" }
+  }
+}

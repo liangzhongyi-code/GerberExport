@@ -712,3 +712,44 @@ def find_window(
             f"找不到符合 {criteria} 的視窗：{exc}。"
             "請確認目標程式正在執行、視窗沒有最小化，且條件沒有打錯"
         ) from exc
+
+
+def window_label(control) -> str:
+    """
+    不純：實際抓到的視窗是誰。
+
+    這個函式的存在是因為一個實測抓到的缺陷：探測報告原本記的是「搜尋條件」
+    而不是「實際抓到的視窗」。開發機上沒有 AccuMark，`title_re="AccuMark.*"`
+    卻探測成功——它匹配到了瀏覽器開著的一份標題以 AccuMark 開頭的文件，而
+    報告上只顯示搜尋條件，使用者完全看不出探錯了對象。
+
+    在目標機上，桌面只要有任何標題以 AccuMark 開頭的視窗，就會產出一份看
+    起來正常、其實結構全錯的報告。
+    """
+    title = str(_read(lambda: control.window_text(), "")).strip()
+    klass = str(_read(lambda: control.class_name(), "")).strip()
+    if title and klass:
+        return f"{title}　[{klass}]"
+    return title or klass or "(無法取得視窗標題)"
+
+
+def list_top_windows(backend: str = BACKEND) -> Tuple[str, ...]:
+    """
+    不純：列出目前畫面上有標題的頂層視窗，去重且保持原順序。
+
+    只在「找不到目標視窗」時用得到。第一次探測時沒人知道 AccuMark 的視窗
+    標題長什麼樣，列出候選讓使用者能直接指認，比雙方反覆猜快得多。
+
+    任何失敗都回空 tuple 而不是拋例外：這是輔助資訊，它自己壞掉不該蓋掉
+    「找不到視窗」這個真正的錯誤。
+    """
+    try:
+        pywinauto = _load_pywinauto()
+        titles = []
+        for window in pywinauto.Desktop(backend=backend).windows():
+            text = str(_read(lambda w=window: w.window_text(), "")).strip()
+            if text:
+                titles.append(text)
+        return tuple(dict.fromkeys(titles))
+    except Exception:  # noqa: BLE001
+        return ()

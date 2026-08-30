@@ -61,6 +61,53 @@ def test_missing_pywinauto_offers_offline_install():
     assert "--find-links" in text
 
 
+def test_offline_command_uses_absolute_path_when_known():
+    """
+    這條是為了一個真實的錯誤加的迴歸測試。
+
+    交付包裡 wheels\\ 與 scripts\\ 是同層，不是 scripts\\ 的子目錄。
+    原本的訊息叫使用者「在 scripts\\ 底下執行 --find-links=wheels」，
+    照著做會找不到套件——而且錯誤訊息只會說找不到套件，看不出是
+    路徑問題。
+
+    相對路徑的正確性取決於使用者在哪個資料夾開 PowerShell，那是我們
+    控制不了的，所以指令裡要填絕對路徑。
+    """
+    cmd = check_env.offline_install_command(r"C:\交付包\wheels")
+    assert r"C:\交付包\wheels" in cmd
+    assert "--find-links" in cmd
+
+
+def test_offline_command_quotes_the_path():
+    """路徑含空白或中文時，沒有引號會被 pip 當成多個參數。"""
+    cmd = check_env.offline_install_command(r"C:\我的 交付包\wheels")
+    assert '"C:\\我的 交付包\\wheels"' in cmd
+
+
+def test_offline_command_falls_back_without_path():
+    """找不到 wheels 資料夾時仍要給出一個看得懂的指令，而不是空字串。"""
+    cmd = check_env.offline_install_command(None)
+    assert "pip install" in cmd and "--no-index" in cmd
+
+
+def test_absolute_path_reaches_the_user_message():
+    text = lines_of(
+        check_env.evaluate((3, 12, 10), None, True, wheels_dir=r"D:\交付包\wheels")
+    )
+    assert r"D:\交付包\wheels" in text
+
+
+def test_message_does_not_give_directory_dependent_instructions():
+    """
+    知道絕對路徑時，訊息不該再叫使用者切到某個特定資料夾——
+    那正是原本出錯的地方。
+    """
+    text = lines_of(
+        check_env.evaluate((3, 12, 10), None, True, wheels_dir=r"D:\交付包\wheels")
+    )
+    assert "scripts\\ 資料夾底下執行" not in text
+
+
 # ── Python 版本過低 ──────────────────────────────────────────────────
 
 

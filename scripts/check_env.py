@@ -16,7 +16,22 @@ from typing import List, Optional, Tuple
 MIN_PYTHON: Tuple[int, int] = (3, 8)
 
 ONLINE_INSTALL = "pip install pywinauto"
-OFFLINE_INSTALL = "pip install --no-index --find-links=wheels pywinauto"
+
+
+def offline_install_command(wheels_dir=None) -> str:
+    """
+    組出離線安裝指令。
+
+    這裡踩過一次坑：交付包裡 wheels\\ 與 scripts\\ 是**同層**，不是
+    scripts\\ 的子目錄。原本訊息叫使用者「在 scripts\\ 底下執行
+    --find-links=wheels」，照著做會找不到套件——相對路徑的正確性
+    取決於使用者在哪個資料夾開 PowerShell，而那是我們控制不了的。
+
+    改成把絕對路徑直接填進指令裡：使用者複製貼上就能跑，不必先
+    搞懂自己現在在哪個目錄。
+    """
+    target = str(wheels_dir) if wheels_dir else "wheels"
+    return 'pip install --no-index --find-links="%s" pywinauto' % target
 
 
 def configure_stdout() -> None:
@@ -52,6 +67,7 @@ def evaluate(
     python_version: Tuple[int, ...],
     pywinauto_version: Optional[str],
     py_launcher_found: bool,
+    wheels_dir=None,
 ) -> Result:
     """
     依環境事實判斷是否可以往下走。
@@ -59,6 +75,7 @@ def evaluate(
     python_version      實際的 Python 版本，例如 (3, 12, 10)
     pywinauto_version   已安裝的版本字串；None 表示匯入失敗
     py_launcher_found   是否找得到 py launcher（只影響提示，不影響結果）
+    wheels_dir          離線套件資料夾的實際位置，用來填進安裝指令裡
 
     問題會一次全部列出，避免使用者修好一個、再跑一次才發現下一個。
     """
@@ -81,14 +98,16 @@ def evaluate(
     else:
         lines.append("[!!]  pywinauto     未安裝")
         problems.append(
-            "缺少 pywinauto。兩種安裝方式，擇一即可：\n"
+            "缺少 pywinauto。開啟 PowerShell，把下面其中一行複製貼上執行：\n"
             "\n"
             "  (1) 這台機器連得上網路：\n"
             "        %s\n"
             "\n"
-            "  (2) 這台機器沒有外網——把交付資料夾裡的 wheels\\ 帶過來，\n"
-            "      在 scripts\\ 資料夾底下執行：\n"
-            "        %s\n" % (ONLINE_INSTALL, OFFLINE_INSTALL)
+            "  (2) 這台機器沒有外網——用交付包裡附的 wheels 資料夾：\n"
+            "        %s\n"
+            "\n"
+            "  （第 2 行的路徑已經填好，在哪個資料夾執行都可以）\n"
+            % (ONLINE_INSTALL, offline_install_command(wheels_dir))
         )
 
     # py launcher：找不到也無妨，.bat 會退回 python，僅提示
@@ -120,11 +139,16 @@ def probe_environment() -> Result:
         pywinauto_version = None
 
     import shutil
+    from pathlib import Path
+
+    # wheels/ 與 scripts/ 同層，所以要往上一層找。
+    wheels = Path(__file__).resolve().parent.parent / "wheels"
 
     return evaluate(
         python_version=sys.version_info[:3],
         pywinauto_version=pywinauto_version,
         py_launcher_found=shutil.which("py") is not None,
+        wheels_dir=wheels if wheels.is_dir() else None,
     )
 
 

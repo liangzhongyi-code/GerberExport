@@ -129,7 +129,15 @@ class FakeClock:
         self.now += seconds
 
 
-def run(samples, *, stable_samples=3, poll_ms=500, timeout=300):
+def run(
+    samples,
+    *,
+    stable_samples=3,
+    poll_ms=500,
+    timeout=300,
+    quiet_period_sec=0.0,
+    abort_fn=None,
+):
     """把一串預先排好的取樣結果餵進等待迴圈。"""
     clock = FakeClock()
     seq = list(samples)
@@ -144,6 +152,8 @@ def run(samples, *, stable_samples=3, poll_ms=500, timeout=300):
         poll_interval_ms=poll_ms,
         stable_samples=stable_samples,
         timeout_sec=timeout,
+        quiet_period_sec=quiet_period_sec,
+        abort_fn=abort_fn,
     )
     return result, clock
 
@@ -195,6 +205,103 @@ def test_files_are_sorted_for_deterministic_output():
     """順序固定，日誌與測試才不會隨機跳動。"""
     result, _ = run([snap(z=1, a=2, m=3)] * 4)
     assert result.files == ("a", "m", "z")
+
+
+# ── 靜默觀察期：附帶檔在穩定視窗關閉後才出現 ─────────────────────────
+#
+# 審查實測抓到的缺陷：AAMA 匯出先寫完 .dxf、停頓約 1 秒才開始寫 .rul。
+# 用 stable_samples=3 / interval=500ms 的話，穩定視窗只有 1.5 秒，會在那個
+# 停頓中就關閉，於是只帶走 .dxf，.rul 被遺棄在暫存夾，而日誌記 SUCCESS。
+#
+# 這正是 TD-4 要防的靜默資料損毀，也直接違反 spec「MUST NOT 只取其中一個」。
+
+
+def test_late_sibling_file_is_not_missed():
+    """
+    .dxf 穩定三次之後 .rul 才出現——靜默觀察期必須把它接住。
+    """
+    seq = [
+        {},
+        {"M001.dxf": 100},
+        {"M001.dxf": 512000},
+        {"M001.dxf": 512000},
+        {"M001.dxf": 512000},  # 連續三次相同，舊版在此就回傳了
+        {"M001.dxf": 512000, "M001.rul": 50},  # 附帶檔才開始寫
+        {"M001.dxf": 512000, "M001.rul": 800},
+        {"M001.dxf": 512000, "M001.rul": 800},
+        {"M001.dxf": 512000, "M001.rul": 800},
+        {"M001.dxf": 512000, "M001.rul": 800},
+        {"M001.dxf": 512000, "M001.rul": 800},
+    ]
+    result, _ = run(seq, quiet_period_sec=2.0)
+    assert result.stable is True
+    assert set(result.files) == {"M001.dxf", "M001.rul"}, (
+        "附帶檔被漏掉了——它會留在暫存夾，而任務記為 SUCCESS"
+    )
+
+
+def test_single_file_pause_does_not_end_the_wait_early():
+    """單檔也中招：寫到一半停頓一下就被判定完成。"""
+    seq = (
+        [{"a.dxf": 5000}] * 4  # 寫到 5000 就停頓
+        + [{"a.dxf": 90000}] * 6  # 其實還會長到 90000
+    )
+    result, _ = run(seq, quiet_period_sec=2.0)
+    assert result.files == ("a.dxf",)
+    # 觀察期必須跨過那個停頓，等到真正的最終大小
+    assert result.elapsed_sec >= 2.0
+
+
+def test_quiet_period_restarts_when_something_changes():
+    """觀察期內有變動就重新來過，不是硬等固定秒數。"""
+    seq = (
+        [{"a.dxf": 100}] * 3
+        + [{"a.dxf": 100, "b.rul": 10}]  # 觀察期內冒出新檔
+        + [{"a.dxf": 100, "b.rul": 10}] * 8
+    )
+    result, _ = run(seq, quiet_period_sec=1.0)
+    assert set(result.files) == {"a.dxf", "b.rul"}
+
+
+def test_quiet_period_zero_keeps_old_behaviour():
+    """設為 0 等於關掉觀察期，讓既有行為與測試不受影響。"""
+    seq = [{"a.dxf": 100}] * 5
+    result, _ = run(seq, quiet_period_sec=0.0)
+    assert result.stable is True
+
+
+# ── 中止鉤子：守衛偵測到未知對話框時要能停 ───────────────────────────
+#
+# design.md §2.3 把 dialog_guard.check_foreground 畫在輪詢迴圈裡，但迴圈由
+# wait_for_stable 擁有，原本沒有任何方式讓守衛提前跳出。實測：第一次輪詢就
+# 偵測到未知對話框，仍輪詢了 601 次、等滿 300 秒。
+#
+# TD-5 與 operability「MUST NOT 送出任何輸入並須中止當前任務」在介面上做不到。
+
+
+def test_abort_stops_the_wait_immediately():
+    result, clock = run([{"a.dxf": 100}] * 50, abort_fn=lambda: True, timeout=300)
+    assert result.stable is False
+    assert result.reason == "aborted"
+    assert clock.now < 1.0, "中止後還在輪詢"
+
+
+def test_abort_reports_no_files():
+    """中止代表沒有可信的產出，跟逾時一樣不回報檔案。"""
+    result, _ = run([{"a.dxf": 100}] * 50, abort_fn=lambda: True)
+    assert result.files == ()
+
+
+def test_abort_is_checked_before_the_first_sleep():
+    """對話框可能在匯出觸發的瞬間就彈出來。"""
+    calls = []
+    run([{"a.dxf": 100}] * 5, abort_fn=lambda: calls.append(1) or True)
+    assert len(calls) == 1
+
+
+def test_no_abort_fn_means_never_abort():
+    result, _ = run([{"a.dxf": 100}] * 5)
+    assert result.stable is True
 
 
 def test_result_reports_elapsed_time():

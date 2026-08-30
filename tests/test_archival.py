@@ -212,7 +212,23 @@ def test_execute_moves_files(tmp_path):
     moves = plan(["A-1234.dxf"], dest=dest)
     written = arc.execute(moves, source_dir=src)
     assert (dest / "A-1234.dxf").is_file()
-    assert written == (dest / "A-1234.dxf",)
+    assert written == (str(dest / "A-1234.dxf"),)
+
+
+def test_execute_returns_strings_not_paths(tmp_path):
+    """
+    下游 TaskRecord.outputs 與 runstate 都以字串為準，而且 outputs 會被
+    json.dumps 寫進 state.json——Path 物件在那裡會直接拋 TypeError。
+
+    這個接縫沒有生產呼叫者，五個模組各自的單元測試都只餵字串，
+    所以型別不符不會有任何測試亮紅燈。
+    """
+    import json
+
+    src = make_temp_export(tmp_path, **{"a.dxf": b"x"})
+    written = arc.execute(plan(["a.dxf"], dest=tmp_path / "out"), source_dir=src)
+    assert all(isinstance(w, str) for w in written)
+    json.dumps({"outputs": list(written)})  # 不應拋出
 
 
 def test_execute_empties_the_temp_dir(tmp_path):

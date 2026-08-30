@@ -714,6 +714,86 @@ def find_window(
         ) from exc
 
 
+SELECTION_CONTROL_TYPES = ("List", "DataGrid", "Table", "Tree", "ListView")
+
+
+def find_foreground_window(backend: str = BACKEND):
+    """
+    不純：抓目前最前面的那個視窗。
+
+    對話框模式需要這個。原本 `--mode dialog` 只改變「要不要讀選取狀態」，
+    視窗搜尋條件仍然是 `AccuMark.*` —— 於是它抓到的是主視窗，不是使用者
+    剛剛開啟的匯出對話框，而報告看起來完全正常。
+
+    使用者被指示「先把對話框開起來再跑」，所以前景視窗就是它。
+    """
+    pywinauto = _load_pywinauto()
+    try:
+        from pywinauto import win32functions, findwindows  # noqa: PLC0415
+
+        handle = win32functions.GetForegroundWindow()
+        if not handle:
+            raise WindowNotFoundError("抓不到前景視窗，請確認對話框開著且在最上層")
+        element = findwindows.find_element(handle=handle)
+        return pywinauto.Desktop(backend=backend).window(
+            handle=element.handle
+        ).wrapper_object()
+    except WindowNotFoundError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise WindowNotFoundError(
+            f"抓不到前景視窗：{exc}。請先把匯出對話框開起來，讓它停在最上層"
+        ) from exc
+
+
+def probe_selection_candidates(control, max_depth: int = DEFAULT_MAX_DEPTH):
+    """
+    不純：走訪樹，對**每一個清單類控制項**嘗試讀取選取狀態。
+
+    這是審查實測抓到的缺陷所在。原本 `probe_ui` 把頂層視窗餵給
+    `read_selection()`，但 SelectionPattern 是清單控制項才有的東西——頂層
+    Window 永遠不會有，於是 `selection_readable` 恆為 false。
+
+    後果是假陰性：使用者會被告知「SELECTED 模式不可用，請手動維護 model
+    清單」，而真正的清單控制項根本沒被問過。那是期一探測最重要的一個問題。
+
+    回傳 [(路徑, 控制項型別, SelectionProbe)]，讓報告能列出**每一個**候選，
+    使用者與後續設定都看得到是哪一個清單可讀。
+
+    走訪失敗（控制項消失、COM 例外）只跳過該節點：探測是唯讀的診斷工具，
+    不該因為某個角落壞掉就整份報告拿不到。
+    """
+    results = []
+
+    def visit(node, path):
+        try:
+            ctype = str(_read(lambda: node.element_info.control_type, UNKNOWN_TYPE))
+        except Exception:  # noqa: BLE001
+            return
+        label = str(_read(lambda: node.window_text(), "")).strip()
+        here = path + [f"{ctype}:{label}" if label else ctype]
+
+        if ctype in SELECTION_CONTROL_TYPES:
+            try:
+                results.append((PATH_SEPARATOR.join(here), ctype, read_selection(node)))
+            except Exception as exc:  # noqa: BLE001
+                results.append(
+                    (
+                        PATH_SEPARATOR.join(here),
+                        ctype,
+                        SelectionProbe(supported=False, items=(), error=_describe_exception(exc)),
+                    )
+                )
+
+        if len(here) > max_depth:
+            return
+        for child in _children(node):
+            visit(child, here)
+
+    visit(control, [])
+    return results
+
+
 def window_label(control) -> str:
     """
     不純：實際抓到的視窗是誰。

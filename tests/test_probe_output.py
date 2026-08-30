@@ -35,6 +35,11 @@ def fake_report(target="記事本"):
     return uia.build_report(root, target=target)
 
 
+def fake_probe(target="記事本", candidates=()):
+    """probe_fn 現在回傳 (報告, 清單控制項候選)。"""
+    return fake_report(target), tuple(candidates)
+
+
 def run(**kw):
     """預設全部成功，各測試覆寫需要的部分。"""
     printed = []
@@ -46,7 +51,7 @@ def run(**kw):
     params = dict(
         mode="window",
         out_dir=Path("out"),
-        probe_fn=lambda: fake_report(),
+        probe_fn=lambda: fake_probe(),
         list_windows_fn=lambda: (),
         write_fn=default_write,
         now=lambda: WHEN,
@@ -117,7 +122,7 @@ def test_report_is_valid_json():
 
 def test_report_json_keeps_chinese_readable():
     """報告要能直接用記事本打開看，逸出成 \\uXXXX 就沒人讀得懂。"""
-    code, printed, written = run(probe_fn=lambda: fake_report(target="外套-左前片"))
+    code, printed, written = run(probe_fn=lambda: fake_probe(target="外套-左前片"))
     assert "外套-左前片" in list(written.values())[0]
 
 
@@ -170,7 +175,7 @@ def test_summary_shows_the_window_actually_captured():
     只印搜尋條件的話，探錯對象時使用者看不出任何異狀。
     """
     code, printed, written = run(
-        probe_fn=lambda: fake_report(target="AccuMark 說明 - Google Chrome")
+        probe_fn=lambda: fake_probe(target="AccuMark 說明 - Google Chrome")
     )
     assert "AccuMark 說明 - Google Chrome" in text_of(printed)
 
@@ -206,6 +211,98 @@ def test_ambiguity_warning_does_not_block_the_report():
     )
     assert code == 0
     assert len(written) == 1
+
+
+# ── 選取狀態要問清單控制項，不是問視窗 ───────────────────────────────
+#
+# 審查實測抓到的缺陷：原本把頂層視窗餵給 read_selection()，但 SelectionPattern
+# 是清單控制項才有的東西，頂層 Window 永遠不會有 —— 於是 selection_readable
+# 恆為「否」，而那是期一探測最重要的一個問題。
+#
+# 使用者會被告知「SELECTED 模式不可用，請手動維護 model 清單」，
+# 而真正的清單控制項根本沒被問過。假陰性，且看起來完全正常。
+
+
+class FakeProbe:
+    def __init__(self, supported, items=(), error=None):
+        self.supported = supported
+        self.items = tuple(items)
+        self.error = error
+
+
+def cand(ctype, supported, items=(), path="root > x"):
+    return (path, ctype, FakeProbe(supported, items))
+
+
+def test_picks_the_list_that_actually_has_a_selection():
+    """使用者照指示框選過，那個就是 model 清單。"""
+    candidates = [
+        cand("Tree", False),
+        cand("List", True, ("A-1234", "A-1235")),
+        cand("DataGrid", True),
+    ]
+    probe, path = probe_ui.pick_best_selection(candidates)
+    assert probe.items == ("A-1234", "A-1235")
+
+
+def test_falls_back_to_supported_but_empty():
+    """他可能忘了框選，但控制項本身可用——仍該回報 SELECTED 模式可行。"""
+    probe, _ = probe_ui.pick_best_selection([cand("Tree", False), cand("List", True)])
+    assert probe.supported is True
+
+
+def test_no_candidates_yields_none():
+    probe, path = probe_ui.pick_best_selection([])
+    assert probe is None and path == ""
+
+
+def test_all_candidates_are_listed_not_just_the_best():
+    """
+    只回報一個布林值就是原本出錯的地方。列出每一個候選，
+    使用者與後續設定才看得到究竟是哪個清單可讀。
+    """
+    lines = probe_ui.format_selection_candidates(
+        [
+            cand("Tree", True, ("節點",), path="root > 導覽樹"),
+            cand("List", False, path="root > 檔案清單"),
+        ]
+    )
+    body = "\n".join(lines)
+    assert "導覽樹" in body and "檔案清單" in body
+    assert "Tree" in body and "List" in body
+
+
+def test_listing_distinguishes_unsupported_from_empty():
+    """
+    「不支援」與「支援但沒選」是完全不同的結論：前者要退回明確清單，
+    後者只是叫他去框選。混為一談會讓使用者做錯決定。
+    """
+    unsupported = "\n".join(probe_ui.format_selection_candidates([cand("Pane", False)]))
+    empty = "\n".join(probe_ui.format_selection_candidates([cand("List", True)]))
+    assert "未曝光" in unsupported
+    assert "沒有選取" in empty
+    assert unsupported != empty
+
+
+def test_no_list_control_found_says_so_and_suggests_depth():
+    lines = probe_ui.format_selection_candidates([])
+    body = "\n".join(lines)
+    assert "一個都沒找到" in body
+    assert "--max-depth" in body
+
+
+def test_candidates_are_written_into_the_report():
+    """後續要據此填 config.controls.model_list，需要完整路徑。"""
+    import json
+
+    code, printed, written = run(
+        probe_fn=lambda: fake_probe(
+            candidates=[cand("List", True, ("A-1234",), path="root > Explorer > 清單")]
+        )
+    )
+    data = json.loads(list(written.values())[0])
+    assert data["selection_candidates"][0]["path"] == "root > Explorer > 清單"
+    assert data["selection_candidates"][0]["items"] == ["A-1234"]
 
 
 # ── 找不到目標：最要緊的路徑 ─────────────────────────────────────────

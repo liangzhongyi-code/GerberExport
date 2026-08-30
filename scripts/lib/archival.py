@@ -146,12 +146,17 @@ def plan(
 # ── 實際搬移 ─────────────────────────────────────────────────────────
 
 
-def execute(moves: Sequence[PlannedMove], source_dir: Path) -> Tuple[Path, ...]:
+def execute(moves: Sequence[PlannedMove], source_dir: Path) -> Tuple[str, ...]:
     """
     把規劃好的搬移做掉，回傳實際寫入的路徑。
 
     失敗時原始檔案一律留在暫存夾——那可能是唯一一份。已經搬走的不回滾
     （它們在目的地是安全的），但會把錯誤往上拋，由主流程中止整批。
+
+    回傳的是**字串**不是 Path：下游的 reporting.TaskRecord.outputs 與
+    runstate 都以字串為準，而且 outputs 會被 json.dumps 寫進 state.json——
+    Path 物件在那裡會直接拋 TypeError。這個接縫沒有生產呼叫者，五個模組
+    各自的單元測試都只餵字串，所以型別不符不會有任何測試亮紅燈。
     """
     src = Path(source_dir)
     written = []
@@ -178,6 +183,6 @@ def execute(moves: Sequence[PlannedMove], source_dir: Path) -> Tuple[Path, ...]:
                 f"搬移 {m.source_name} 到 {m.dest_path} 失敗：{exc}"
             ) from exc
 
-        written.append(m.dest_path)
+        written.append(str(m.dest_path))
 
     return tuple(written)

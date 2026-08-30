@@ -74,6 +74,64 @@ def format_summary_lines(report) -> list:
     return lines
 
 
+def pick_best_selection(candidates: Sequence[tuple]):
+    """
+    純函式：從清單類控制項的候選中挑出最可能是 model 清單的那一個。
+
+    候選是 `(路徑, 控制項型別, SelectionProbe)`。排序理由：
+
+      1. 曝光了選取狀態**且真的讀到項目** —— 使用者照指示框選過，這就是它
+      2. 曝光了選取狀態但讀到 0 項 —— 可能是他忘了框選，仍然可用
+      3. 其餘
+
+    回傳 `(最佳候選的 SelectionProbe, 最佳候選的路徑)`；沒有任何候選時
+    回 `(None, "")`，交給 uia.evaluate_selection 產生「未探測」的判讀。
+    """
+    if not candidates:
+        return None, ""
+
+    def rank(item):
+        _, _, probe = item
+        if probe.supported and probe.items:
+            return 0
+        if probe.supported:
+            return 1
+        return 2
+
+    path, _, probe = min(candidates, key=rank)
+    return probe, path
+
+
+def format_selection_candidates(candidates: Sequence[tuple]) -> list:
+    """
+    列出**每一個**清單類控制項的選取狀態。
+
+    原本只回報一個布林值，而且問錯了對象（頂層視窗）。列出全部候選之後，
+    使用者與後續設定都看得到究竟是哪一個清單可讀——那是決定 `models` 能否
+    用 SELECTED 模式的依據。
+    """
+    if not candidates:
+        return [
+            "清單類控制項：一個都沒找到。",
+            "　└ 可能是深度上限太淺，或這個視窗底下真的沒有清單。"
+            "可用 --max-depth 調高再試一次。",
+        ]
+    lines = ["清單類控制項（決定 models 能不能用 SELECTED 模式）："]
+    for path, ctype, probe in candidates:
+        if probe.supported and probe.items:
+            state = "可讀取，目前選了 %d 項：%s" % (
+                len(probe.items),
+                "、".join(probe.items[:5]) + ("…" if len(probe.items) > 5 else ""),
+            )
+        elif probe.supported:
+            state = "可讀取，但目前沒有選取任何項目"
+        else:
+            state = "未曝光選取狀態"
+        lines.append("　[%s] %s" % (ctype, state))
+        lines.append("　　　%s" % path)
+    return lines
+
+
 def matching_titles(titles: Sequence[str], pattern: str) -> tuple:
     """
     純函式：哪些視窗標題會匹配這個條件。
@@ -177,7 +235,7 @@ def run(
     任何失敗都走同一條路：印出人看得懂的說明、回非零、**不寫任何檔案**。
     """
     try:
-        report = probe_fn()
+        report, selection_candidates = probe_fn()
     except uia.PywinautoMissingError as exc:
         echo("探測無法進行：%s" % exc)
         echo("")
@@ -200,9 +258,20 @@ def run(
         return 4
 
     path = report_path(out_dir, mode, now())
-    payload = json.dumps(
-        uia.report_to_dict(report), ensure_ascii=False, indent=2
-    )
+    data = uia.report_to_dict(report)
+    # 完整候選清單也寫進報告：摘要只印得下重點，但後續要據此填
+    # config.controls.model_list，需要每個候選的完整路徑。
+    data["selection_candidates"] = [
+        {
+            "path": cand_path,
+            "control_type": ctype,
+            "supported": probe.supported,
+            "items": list(probe.items),
+            "error": probe.error,
+        }
+        for cand_path, ctype, probe in selection_candidates
+    ]
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
     write_fn(path, payload + "\n")
 
     # 警告放在摘要之前：探錯對象時，這是唯一能讓使用者察覺的線索。
@@ -215,6 +284,9 @@ def run(
             echo(line)
 
     for line in format_summary_lines(report):
+        echo(line)
+    echo("")
+    for line in format_selection_candidates(selection_candidates):
         echo(line)
     echo("")
     echo("報告已產出：")
@@ -236,19 +308,29 @@ def _make_probe(args):
     """把命令列參數包成一次探測。實際碰 pywinauto 的只有這裡。"""
 
     def probe():
-        control = uia.find_window(
-            title_re=args.title,
-            class_name=args.class_name,
-        )
+        if args.mode == "dialog" and args.title == DEFAULT_TITLE:
+            # 對話框模式若沒指定標題，就抓前景視窗。
+            # 原本這裡沿用 AccuMark.* ——那會抓到主視窗而不是使用者剛開起來
+            # 的匯出對話框，而報告看起來完全正常。
+            control = uia.find_foreground_window()
+        else:
+            control = uia.find_window(
+                title_re=args.title,
+                class_name=args.class_name,
+            )
+
         # target 記的是「實際抓到誰」而不是「我搜尋了什麼」。
         # 只記搜尋條件的話，探錯對象時報告看起來完全正常。
         label = uia.window_label(control)
         root = uia.walk(control, max_depth=args.max_depth)
-        selection = None
-        if args.mode == "window":
-            # 只有主視窗需要判斷清單能不能讀取選取項；對話框沒有這回事。
-            selection = uia.read_selection(control)
-        return uia.build_report(root, target=label, selection=selection)
+
+        # 對每個清單類控制項各問一次，而不是問頂層視窗。
+        # SelectionPattern 是清單才有的東西，問視窗永遠得到「否」。
+        candidates = uia.probe_selection_candidates(control, max_depth=args.max_depth)
+        selection, _ = pick_best_selection(candidates)
+
+        report = uia.build_report(root, target=label, selection=selection)
+        return report, candidates
 
     return probe
 

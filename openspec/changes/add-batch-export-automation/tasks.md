@@ -139,7 +139,7 @@
 - **估時**：25 分
 
 > ### ⛸ 交付點 1
-> 交付 `scripts/` + 手冊前半。你在目標機執行 `1_` 與 `2_` 兩支 `.bat`，把 `probe-output/` 帶回。
+> 交付 `scripts/` + 手冊前半。你在目標機執行 `1_` 與 `2a`–`2c`，把 `probe-output/` 與回報表帶回。
 > **交付前輸出 commit 訊息文字供你自行提交。**
 
 ---
@@ -208,57 +208,70 @@
 
 ---
 
-## 階段 D — 期二整合（需探測報告）
+## 階段 D — 期二整合
 
-### D1. 依探測報告填寫 `config.controls`
+> 2026-09-02 重排。TD-9／TD-10 之後，D 階段不再以探測報告為前提；探測報告與回報表變成 D6 的修正輸入。
 
-- **產出**：`scripts/config.json`
-- **相依**：⛸ 交付點 1 完成
-- **成功條件**：六個控制項定位資訊全部填入且策略非 `UNSTABLE`；依 `selection_readable` 決定 `models` 預設值；若有 `UNSTABLE` 先回報並討論替代定位方式
-- **估時**：20 分
+### D0. 修審查 blocker 與設定 schema 擴充
 
-### D2. `uia` 操作層與 model 清單解析
+- **產出**：`lib/archival.py`、`lib/dialog_guard.py`、`lib/config.py`、`config.json`、對應測試
+- **相依**：無
+- **成功條件**：歸檔撞名比對不分大小寫；守衛在標題為 None 時安全停機；config 接受 `expected_outputs`／`zip`／`dxf`／巢狀 `controls`（explorer／dcu）、策略新增 `title_re`／`control_type`、`quiet_period_sec`，移除 `verify_exclusive_lock`；`temp_dir` 巢狀於 `output_root` 拒絕；`result_status` 對照 Status 白名單；`zip.complete_dialog.title_like` 拒絕純萬用字元
+- **估時**：40 分
 
-- **產出**：`scripts/lib/uia.py`（操作部分）
-- **相依**：D1
-- **對應 Scenario**：選取模式、選取模式但未選取任何項目、逐一匯出、設定檔中的 model 不存在、匯出設定不被更動、對話框已記住上次路徑、對話框路徑不正確
-- **驗證**：目標機驗收（開發機無 AccuMark）
-- **成功條件**：`select_model` / `trigger_export` / `read_path_field` / `set_path_field` / `read_selected_models` 五個函式；**不含任何實體輸入 API**（由 C5 守護）；未選取時明確中止而非誤取全部
-- **估時**：45 分
+### D1. `archival.check_ownership` 與 `_未歸類`／`_逾時殘留`
 
-### D3. 環境檢查
-
-- **產出**：`scripts/lib/uia.py`、`scripts/batch_export.py`（檢查段）
-- **相依**：D2
-- **對應 Scenario**：AccuMark 未啟動、工作階段已鎖定、環境檢查全數通過、暫存目錄不存在、暫存目錄啟動時非空
-- **驗證**：目錄相關以 pytest 覆蓋；鎖屏偵測目標機驗收
-- **成功條件**：AccuMark 未執行 → 中止且**不建立任何目錄或檔案**；鎖定 → 中止並記錄；暫存目錄不存在 → 自動建立；**非空 → 停止並要求確認，絕不自動刪除**
+- **產出**：`lib/archival.py`、`tests/test_archival.py`
+- **相依**：D0
+- **對應 Scenario**：產出主檔名須符合當前 model、產出檔名不符當前 model、逾時訊號未到
+- **成功條件**：純函式；不分大小寫；不符的不丟、不歸錯；突變檢查通過
 - **估時**：35 分
 
-### D4. `batch_export.py` 主流程編排
+### D2. `completion` 模組——訊號 + 穩定
 
-- **產出**：`scripts/batch_export.py`、`tests/test_orchestration.py`
-- **相依**：D3、C1–C4
-- **對應 Scenario**：四個 model 完整跑完（＋七種狀態轉移整合）
-- **驗證**：以假的 uia 替身跑完整 12 任務流程（驗證編排與狀態機，非驗證 UI）；真實行為目標機驗收
-- **成功條件**：
-  - 12 任務依序執行，七種狀態轉移正確
-  - `FAILED_MOVE` 與 `HALTED_UNKNOWN_DIALOG` 中止整批，其餘繼續
-  - **每次觸發匯出前斷言暫存夾為空**（核心不變式）
-  - 支援 `--only <model>`、`--format <fmt>`、`--force`
-- **估時**：50 分
-
-### D5. 完整使用手冊
-
-- **產出**：`docs/使用手冊.md`（完整版）、`README.md`
-- **相依**：D4
-- **對應 Scenario**：使用者依手冊完成首次設定、遇到未知對話框後自行排除、手冊與實作一致
-- **成功條件**：涵蓋安裝與離線 wheel、探測操作、首次設定、日常操作、輸出結構、**螢幕可關但不可鎖**、七種狀態的意義與處置、日誌位置與判讀、常見問題、白名單擴充步驟；逐項比對確認手冊中每個 `.bat` 檔名／設定欄位／狀態代碼皆與實作一致；`README.md` 含你自行推 GitHub 所需的指令
+- **產出**：`lib/completion.py`、`tests/test_completion.py`
+- **相依**：C1
+- **對應 Scenario**：ZIP 完成對話框出現、完成對話框出現但暫存夾仍在寫入、DXF 以預期檔案數判定、逾時訊號未到、一次匯出產生多個檔案、大型 model 匯出耗時較久
+- **成功條件**：純函式（訊號偵測函式注入）；訊號未到 MUST NOT 開始算穩定；`files` 模式預期數量正確（單一 model）；突變檢查通過
 - **估時**：45 分
 
+### D3. `uia` 操作層
+
+- **產出**：`lib/uia.py`（操作部分）
+- **相依**：D0
+- **成功條件**：`resolve(spec)`／`select_single`／`read_selection`／`set_value`／`invoke`／`set_combo`／`read_text`／`wait_window`；**不含任何實體輸入 API**（C5 守護）；`select_single` 後讀回確認恰好一項
+- **驗證**：目標機驗收（`test_uia_live.py` 只覆蓋不需 AccuMark 的部分）
+- **估時**：45 分
+
+### D4. `batch_export.py` 主流程與 `--dry-run`
+
+- **產出**：`scripts/batch_export.py`、`tests/test_orchestration.py`、`scripts/2e_確認控制項.bat`
+- **相依**：D1–D3、C2–C4
+- **對應 Scenario**：每個任務恰含一個 model 五條、固定輸出路徑四條、`--dry-run` 四條、暫存目錄啟動時非空、環境檢查（AccuMark 未啟動、工作階段已鎖定、環境檢查全數通過）、不佔用實體輸入裝置
+- **驗證**：以假 uia 替身跑完整 12 任務流程；dry-run 以替身驗證「零操作呼叫」；替身記錄每次呼叫供斷言
+- **成功條件**：12 任務依序、狀態轉移正確；DCU 讀回選取不是恰好該 model → `FAILED_SELECTION` 且替身記錄到零次執行鈕呼叫；`FAILED_MOVE`／`HALTED_UNKNOWN_DIALOG` 中止整批；觸發前斷言暫存夾為空；`--only`／`--format`／`--force`／`--dry-run`；state 落 `scripts\runs\`；OK 只按在宣告的完成對話框
+- **估時**：60 分
+
+### D5. 手冊期二章節
+
+- **產出**：`docs/使用手冊.md`、`README.md`、`scripts/讀我_先跑這個.txt`
+- **相依**：D4
+- **對應 Scenario**：使用者依手冊完成首次設定、遇到未知對話框後自行排除、手冊與實作一致
+- **成功條件**：dry-run 流程、12 任務結構、`_未歸類`／`_逾時殘留` 的意義、`FAILED_SELECTION` 的意義與處置、`expected_outputs` 怎麼填、**螢幕可關但不可鎖**、狀態代碼、日誌位置、白名單擴充；逐項比對 `.bat` 檔名／設定欄位／狀態代碼
+- **估時**：40 分
+
 > ### ⛸ 交付點 2
-> 你依 design.md §9.3 的九項驗收清單在目標機實測並回報。
-> **交付前輸出 commit 訊息文字供你自行提交。**
+> 對方跑 `2e_確認控制項.bat`，帶回缺項清單（連同探測報告與回報表）。
+
+### D6. 依缺項清單與探測報告修正 `controls`
+
+- **產出**：`scripts/config.json`
+- **相依**：⛸ 交付點 2
+- **成功條件**：dry-run 全綠；`expected_outputs` 依回報表第 17–19 題修正；`models` 依選取狀態可讀性決定
+- **估時**：30 分
+
+> ### ⛸ 交付點 3
+> 對方先跑 `3_執行批次匯出.bat --only <一個 model>` 試一個，再全跑。依 design.md §9.3 驗收清單回報。
 
 ---
 
@@ -269,11 +282,11 @@
 | A 基礎建設 | 3 | 80 分 | 僅 A0 後需你跑一次環境檢查 |
 | B 期一探測 | 4 | 125 分 | 否 |
 | C 純函式層 | 5 | 165 分 | 否 |
-| D 期二整合 | 5 | 195 分 | **是**（需探測報告） |
-| **合計** | **17** | **約 9.5 小時** | |
+| D 期二整合 | 7 | 295 分 | D0–D5 否；D6 需交付點 2 的缺項清單 |
+| **合計** | **19** | **約 11 小時** | |
 
-無單一任務超過 60 分。**68 個 Scenario 全數對應到任務。**
+無單一任務超過 60 分。Scenario 數依 2026-09-02 改版重算，見 design.md §13。
 
 ## 未決事項
 
-全部已於 design.md §12 收斂。剩餘未知數皆由 ⛸ 交付點 0 與 1 解決，**不阻擋開工**。
+全部已於 design.md §12 收斂。剩餘未知數由 `--dry-run`（交付點 2）解決，**不阻擋 D0–D5 開工**。

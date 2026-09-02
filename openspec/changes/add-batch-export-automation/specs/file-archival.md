@@ -5,9 +5,9 @@
 ### Requirement: 即時搬離暫存區
 The system SHALL 在每次匯出完成偵測成功後，立即將該次產出的所有檔案搬離暫存目錄，使暫存目錄在下一次匯出開始前為空。
 
-#### Scenario: 連續兩次匯出
-- **GIVEN** 某 model 的 AAMA 匯出已完成並搬離
-- **WHEN** 腳本開始同一 model 的 ASTM 匯出
+#### Scenario: 連續兩個任務
+- **GIVEN** 某任務（例如 AAMA）的產出已完成並搬離
+- **WHEN** 腳本開始下一個任務（例如 ASTM，其產出檔名與前者相同）
 - **THEN** 暫存目錄在觸發匯出前為空，因此新出現的任何檔案必定屬於本次任務
 
 #### Scenario: 搬移失敗
@@ -24,6 +24,18 @@ The system SHALL 將每個 model 的產出集中到以該 model 命名的獨立�
 - **GIVEN** 4 個 model 全部匯出成功
 - **WHEN** 腳本結束
 - **THEN** 輸出根目錄下存在 4 個以 model 名命名的子資料夾，每個含該 model 的 3 種格式產出
+
+#### Scenario: 產出主檔名須符合當前 model
+- **GIVEN** 某 model 的 AAMA 任務產出 `<model>.dxf` 與 `<model>.rul`
+- **WHEN** 腳本歸檔
+- **THEN** 每個檔案的主檔名（不分大小寫）與該 model 相符，搬入該 model 的資料夾
+
+> **背景**（TD-9）：任務逐 model，歸屬本不需推論；這個檢查是防線——DCU 若額外輸出、或選取殘留造成別的 model 混入，要被看見而非靜默歸到錯的資料夾。
+
+#### Scenario: 產出檔名不符當前 model
+- **GIVEN** 暫存目錄出現一個主檔名不符合當前 model 的檔案
+- **WHEN** 腳本歸檔
+- **THEN** 該檔案搬到輸出根目錄下的 `_未歸類\<任務>\`，記一筆 WARN 並列出檔名，MUST NOT 刪除、MUST NOT 留在暫存目錄、MUST NOT 歸入任何 model 資料夾
 
 #### Scenario: 輸出根目錄含批次時間戳
 - **GIVEN** 使用者在同一天執行兩次批次

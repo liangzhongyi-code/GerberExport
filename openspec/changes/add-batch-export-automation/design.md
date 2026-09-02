@@ -67,18 +67,20 @@
 │  │  probe_ui.py                                            │    │
 │  │    走訪 UIA 樹 → probe-output\probe_<時間戳>.json        │    │
 │  └────────────────────┬───────────────────────────────────┘    │
-│                       │ ② 報告帶回開發機                        │
-│                       │ ③ 開發機依報告填寫 config.json 的        │
-│                       │    controls 區段，再送回目標機           │
+│                       │ ② 報告＋回報表帶回開發機                 │
+│                       │ ③ 開發機以官方文件命名預填 controls，    │
+│                       │    對方跑 --dry-run 回報缺項再修（TD-10）│
 │                       ▼                                        │
 │  ┌── 期二 ────────────────────────────────────────────────┐    │
 │  │  batch_export.py                                        │    │
 │  │    ├─ 環境檢查（AccuMark 在跑？未鎖屏？目錄可寫？）        │    │
 │  │    ├─ 讀 config.json + 續跑狀態                          │    │
 │  │    ├─ 解析 model 清單（Explorer 選取項 或 明確清單）      │    │
-│  │    └─ 任務迴圈：N model × 3 格式                         │    │
-│  │         ├─ UI 層  ：選取 model → 觸發匯出               │    │
-│  │         ├─ 偵測層 ：輪詢暫存夾直到檔案大小穩定            │    │
+│  │    ├─ --dry-run：只定位控制項、回報缺哪幾個，不點任何東西  │    │
+│  │    └─ 任務迴圈：N model × 3 格式（ZIP 走 Explorer、DXF 走 DCU）│    │
+│  │         ├─ UI 層  ：ZIP 走 File/Export Zip 精靈；         │    │
+│  │         │           DXF 在 DCU 表單單選該 model，讀回確認   │    │
+│  │         ├─ 偵測層 ：等 UI 完成訊號，再以檔案穩定確認       │    │
 │  │         ├─ 守衛層 ：每輪檢查有無非白名單對話框            │    │
 │  │         └─ 歸檔層 ：立即搬離 → model 資料夾（保留原檔名） │    │
 │  └────────────────────────────────────────────────────────┘    │
@@ -106,35 +108,52 @@
 
 ### 2.3 Component Interactions
 
-單次任務（`model` × `format`）的完整流程：
+期二有兩種任務，走兩個不同的視窗（TD-9），但**每個任務恰含一個 model**：
+
+| 任務 | 數量 | 視窗 | 觸發方式 | 完成訊號 |
+|---|---|---|---|---|
+| ZIP | 每個 model 一個 | AccuMark Explorer | File → Export Zip 精靈 | 「Process Complete」對話框 |
+| DXF | 每個 model × 每種格式一個（AAMA、ASTM） | Data Conversion Utility | 表單：File Type、Source File Name（**單選**該 model）、Destination Path → 執行鈕 | Results 窗格；退而求其次以預期檔案數 |
+
+單次任務的完整流程：
 
 ```
 batch_export.py
   │
-  ├─ runstate.should_skip(model, format)? ──是──▶ 記錄 SKIPPED_ALREADY_DONE，下一個
-  │                                       否
+  ├─ runstate.should_skip(task)? ──是──▶ 記錄 SKIPPED_ALREADY_DONE，下一個
+  │                                 否
   ├─ 斷言暫存夾為空（不為空 → 中止整批）
   │
-  ├─ uia.select_model(model)              ← 依 config.controls 定位
-  ├─ uia.trigger_export(format)           ← 依 config.controls 定位
+  ├─ UI 層（依 config.controls 定位；只用 Invoke／SetValue／Select，無實體輸入）
+  │    ZIP：uia.select_single(explorer.model_list, model) → 觸發 File/Export Zip
+  │         → 等「Export To」對話框 → 路徑欄設為 temp_dir → OK
+  │         → 等匯出畫面 → 不碰任何選項 → OK
+  │    DXF：uia.set_combo(dcu.file_type, fmt) → uia.select_single(dcu.source_list, model)
+  │         → 讀回選取狀態：**恰好 1 項且等於該 model**，否則 FAILED_SELECTION、不執行
+  │         → 路徑欄設為 temp_dir → 觸發執行鈕
   │
-  ├─ 輪詢迴圈（每 poll_interval_ms 一次，至多 timeout_sec）
+  ├─ 等待迴圈（每 poll_interval_ms 一次，至多 timeout_sec）
   │    ├─ dialog_guard.check_foreground()
-  │    │     └─ 非白名單視窗 → HALTED_UNKNOWN_DIALOG，中止整批
-  │    ├─ 取樣暫存夾檔案清單與大小
-  │    └─ stability.is_stable(取樣序列)? ──是──▶ 跳出
+  │    │     ├─ 是本任務宣告的完成對話框 → 記下，不算未知
+  │    │     └─ 其他非白名單視窗 → HALTED_UNKNOWN_DIALOG，中止整批（abort_fn）
+  │    ├─ 完成訊號到了？（ZIP：完成對話框出現；DXF：Results 有結果 或 預期檔案數已齊）
+  │    └─ 訊號到了才開始 → stability.wait_for_stable（含 quiet_period）
   │
-  ├─ 逾時 → FAILED_TIMEOUT，清理暫存夾，下一個任務
+  ├─ ZIP：完成對話框按 OK（只在訊號＋穩定都確認之後，且只按這一個）
+  ├─ 逾時 → FAILED_TIMEOUT；暫存夾殘留物**不刪**，搬到 _逾時殘留\<任務>\，下一個任務
   │
-  ├─ archival.plan(產出檔案清單, model, 目的夾) → 目的路徑清單（純計算）
-  │     └─ 保留原檔名；僅在目的地已存在同名檔時才附加區別後綴
-  ├─ 實際搬移（失敗 → FAILED_MOVE，保留原檔，中止整批）
+  ├─ archival.check_ownership(暫存夾檔案, model)          ← 純計算
+  │     └─ 主檔名不符該 model 的檔案 → _未歸類\<任務>\ 並記 WARN（防線，見 TD-9）
+  ├─ archival.plan(...) → 目的路徑（保留原檔名；僅衝突時改名，TD-8）
+  ├─ archival.execute(...)（失敗 → FAILED_MOVE，保留原檔，中止整批）
   │
-  ├─ runstate.mark_success(model, format, 產出清單)
+  ├─ runstate.mark(task, status, 產出清單)
   └─ reporting.write(任務結果)
 ```
 
-**關鍵不變式**：每次觸發匯出之前，暫存夾必為空。因此「暫存夾裡出現的任何東西」必然屬於當前任務——不需要比對檔名、不需要記錄前後差異、不會誤把上一個任務的殘留當成本次產出。這條不變式讓完成偵測與歸檔的邏輯都變得極簡且不易出錯。
+**關鍵不變式不變，而且更嚴**：每次觸發之前暫存夾必為空，因此暫存夾裡出現的任何東西必屬當前任務——而當前任務恰含一個 model。DCU 多選會把全部 model 的裁片併進同一個 DXF（使用者實務確認），所以 DCU 端也逐 model 單選，並在觸發前讀回選取狀態確認恰好一項。「不會合併」是結構保證加讀回驗證，不是靠祈禱。
+
+**「OK」只按在明確宣告的完成對話框上。** 白名單（TD-5）的動作仍限 Cancel／Close／No；完成對話框是流程自己在等的、標題由設定檔宣告、且只在完成訊號確認後才按。兩者刻意分開：前者是「遇到不認識的東西要怎麼退」，後者是「這一步本來就該按的那個鈕」。
 
 ---
 
@@ -234,34 +253,40 @@ B 選項被排除的理由值得記下：對一個你尚未觀察過的外部系
 
 ---
 
-### TD-4：以「檔案大小連續穩定」判定匯出完成
+### TD-4：完成偵測以 UI 完成訊號為主，檔案穩定為輔
+
+> 2026-09-02 修訂。原版採「檔案大小連續穩定」為唯一依據；查得官方文件後改為以 UI 訊號為主。原版的選項與風險保留於下。
 
 **Context**
-腳本必須知道一次匯出何時真正結束，才能安全地搬檔並進入下一個任務。AccuMark 的匯出耗時隨裁片數量變動，且沒有可靠的程式化完成訊號。
+腳本必須知道一次匯出何時真正結束，才能安全地搬檔並進入下一個任務。初版設計時認為「沒有可靠的程式化完成訊號」，只能觀測檔案。查閱 Gerber 官方線上說明後發現兩條路徑都有明確訊號：Export Zip 結束會跳「Process Complete」對話框（`help.gerbertechnology.com/accumark/AMX/Export.htm`）；DCU 執行完在 Results 窗格顯示結果。
 
 **Options Considered**
 
 | 選項 | 問題 |
 |---|---|
-| A. 固定 `Start-Sleep -Seconds N` | N 太小 → 搬到寫到一半的檔案（**靜默資料損毀**，最嚴重）；N 太大 → 12 次任務累積大量空等 |
-| B. 偵測 UI 上的進度條／完成提示消失 | 依賴 UI 結構，是本專案最不穩定的部分；且不同格式的提示可能不同 |
-| C. 輪詢暫存夾，檔案出現且大小連續 N 次取樣不變即判定完成 | 需選定取樣次數與間隔；理論上存在「寫入暫停恰好跨越取樣窗」的誤判 |
-| D. 嘗試以獨佔模式開啟檔案，成功即表示無人寫入 | 判定最準確，但 PowerShell 中對某些檔案類型行為不一致，且可能干擾寫入端 |
+| A. 固定 sleep | N 太小 → 搬到寫到一半的檔案（**靜默資料損毀**）；太大 → 空等 |
+| B. 只看 UI 完成訊號 | 訊號出現時檔案未必已 flush；且 DCU Results 能否以 UIA 讀到尚未實測 |
+| C. 只看檔案穩定（原版決定） | 審查實測抓到兩個缺陷：`.dxf` 穩定後 `.rul` 才出現；寫入暫停跨越取樣窗。都以參數緩解，但本質是啟發式——沒有有限的觀察期能對抗任意長的停頓 |
+| D. **B 為主、C 為輔**：先等訊號，訊號到了再等檔案穩定 | 兩道檢查都要過。訊號讀不到時（DCU）退回「預期檔案數已齊」+ 穩定 |
 
 **Decision**
-採用 **C**，取樣參數外置於設定檔（預設：間隔 500ms、連續 3 次穩定、逾時 300 秒）。C 的判定結果再以 D 作為**選用的二次確認**（設定檔開關，預設關閉）。
+採用 **D**。
+- ZIP：等標題符合 `zip.complete_dialog.title_like` 的視窗出現 → 等暫存夾檔案穩定 → 按該對話框的 OK。
+- DXF：`dxf.completion` 為 `results_text` 時等 Results 控制項文字變動；為 `files`（預設）時等暫存夾檔案數達 `len(expected_outputs[fmt])`（單一 model）→ 再等穩定。
+- 穩定判定參數不變（間隔 500ms、連續 3 次、`quiet_period_sec`、逾時 300 秒）。
 
 **Rationale**
-C 是唯一同時滿足「不依賴 UI 結構」與「不依賴猜測的等待時間」的方案。它直接觀測我們真正關心的東西——檔案本身——而不是任何代理指標。
+訊號解決的是「該從什麼時候開始算穩定」——C 的兩個缺陷都出在「太早開始算」。訊號到了之後才看檔案，寫入暫停就不再是問題：AccuMark 自己說做完了。而檔案穩定解決的是「訊號出現與 flush 之間的縫」，那一段很短，但搬到半個檔案的代價太高，多等 1.5 秒划算。
 
-C 的誤判風險（寫入暫停跨越取樣窗）以參數化緩解：預設 1.5 秒的穩定窗對本機磁碟寫入而言相當寬鬆，而若目標機實測發現大型 model 有長暫停，使用者可自行調高次數，無需改程式碼。保留 D 作為選用開關，是因為它在理論上更精確，但需目標機實測確認不會干擾 AccuMark 寫檔——不確定的東西不設為預設。
+DXF 預設用 `files` 而非 `results_text`，因為 Results 窗格是什麼控制項、文字能否讀到，要 dry-run 回來才知道；預期檔案數則只靠設定檔就能算。
 
 **Consequences**
-- ✅ 大型 model 不會誤判失敗，小型 model 不會空等
-- ✅ 完全不依賴 UI 結構，AccuMark 升級也不受影響
-- ✅ 「逾時未出現檔案」自然成為匯出失敗的可靠訊號
-- ⚠️ 每次任務固定多耗 1.5 秒確認時間（12 次共 18 秒，可接受）
-- ⚠️ 若 AccuMark 先建立零位元組佔位檔再寫入，取樣邏輯須把「大小為 0」視為未穩定——已列入實作注意事項
+- ✅ 不再有「提前判定」這一類缺陷：開始算穩定的時間點由 AccuMark 決定
+- ✅ 逾時語意更清楚：「訊號沒來」與「訊號來了但檔案沒齊」分開記錄
+- ✅ 大型 model 不會誤判失敗，小型不會空等（維持）
+- ⚠️ ZIP 多依賴一個 UI 元素（完成對話框標題）；AccuMark 升級若改字，只需改設定檔
+- ⚠️ `expected_outputs` 要填對（AAMA 是否附 `.rul`）——填少了會提早判定、填多了會逾時。回報表第 17–19 題就是問這個
+- ⚠️ 零位元組佔位檔仍視為未穩定（維持）
 
 ---
 
@@ -313,6 +338,7 @@ A 的致命處在於失敗是靜默的：使用者會拿到 11 個檔案卻以�
 - ✅ 完成偵測與歸檔邏輯大幅簡化
 - ✅ 中途失敗時，已完成的產出已在安全位置
 - ⚠️ 啟動時若暫存夾非空，代表上次執行異常中斷 → 依規格停止並要求使用者確認，**不自動刪除**
+- ⚠️ 每個任務恰含一個 model（TD-9），暫存夾裡的東西理應全屬它；主檔名不符的一律搬到 `_未歸類\` 記 WARN——DCU 若額外輸出，要被看見而非靜默歸錯資料夾
 
 ---
 
@@ -408,6 +434,61 @@ AccuMark 匯出的檔名依版片編號產生。初版採取防禦姿態，對�
 
 ---
 
+### TD-9：DXF 走 Data Conversion Utility，逐 model、逐格式，絕不多選
+
+**Context**
+使用者確認：AAMA／ASTM 在 DCU 匯出。DCU 是一張表單（File Type、Source Storage Area、Notch Table、Source File Name、Destination Path、Destination File Name）加一顆執行鈕，結果顯示在 Results 窗格——不是模態對話框接力。Source File Name 可以多選，**但多選匯出會把全部 model 的裁片併進同一個 DXF**（使用者實務確認）。他要的是每個 model 各自一個 DXF、放進各自的資料夾。
+
+**Options Considered**
+- **A. DXF 逐 model 跑（N × 2 次），每次 Source File Name 只選一個**：分檔由結構保證——一次只有一個 model 進去，出來的不可能混。續跑粒度細、歸檔不必比對檔名。
+- **B. 逐格式跑（2 次），多選全部 model**：操作最少，但產出是一個混合 DXF——正是使用者要避免的結果。除非 DCU 有「每個 model 分檔」的選項且可靠，否則不可行；而依賴一個選項的狀態正確，遠不如結構上根本不給它混的機會。
+
+**Decision**
+採用 **A**。任務數 = N × 3（ZIP、AAMA、ASTM 各一）。觸發 DCU 前 MUST 讀回 Source File Name 的選取狀態，**恰好一項且名稱等於該 model** 才執行；否則 `FAILED_SELECTION`、不執行、記錄讀到的全部項目——這是「不會合併」的機械保證。
+
+**Rationale**
+「不混」不能靠設定選項或操作習慣，要靠結構：一次只放一個 model 進去，出來的就只能是那一個。這與 ZIP 的做法完全一致，也維持 §2.3 的核心不變式——暫存夾裡的東西必屬當前這一個 model。
+
+讀回驗證擋的是最可能的失誤：DCU 記住上一次的選取，`Select` 新的一項卻沒清掉舊的，於是兩個都亮著。不驗證的話，那一次會安靜地產出一個混合 DXF，檔名還是對的。
+
+單選在 UI 上也比多選簡單：`Select` 一次，不必 `AddToSelection` 多次再逐一驗證。
+
+代價是 DCU 執行 2N 次而非 2 次。每次幾秒，四個 model 總共不到一分鐘；使用者本來就不必看著它跑。
+
+**Consequences**
+- ✅ 分檔由結構保證，且觸發前有讀回驗證；選取殘留會被抓到而非靜默合併
+- ✅ 歸檔不需要依檔名推歸屬；主檔名檢查與 `_未歸類\` 僅作為防線
+- ✅ DCU 表單欄位可用 ValuePattern／SelectionPattern 設值，不需要精靈接力
+- ⚠️ DCU 執行 2N 次；每次觸發前要重選一次
+- ⚠️ Export Options（View → Options）**永遠不碰**：使用者建檔時已設好，腳本只設 File Type、來源選取、目的路徑三樣
+
+---
+
+### TD-10：控制項定位先以官方文件命名預填，再以 `--dry-run` 對照修正
+
+**Context**
+TD-2 的流程是「探測 → 人讀 700 節點的樹 → 填 config → 送回 → 跑」。官方文件已給出各控制項的顯示名稱（File、Export Zip、Export To、Process Complete、OK、File Type、Destination Path…），pywinauto 用 `name` 定位這些的成功率相當高——標準 Windows 對話框（資料夾選擇、訊息框）尤其穩定。
+
+**Options Considered**
+- **A. 維持：等探測報告，逐一對照填 config**：每一輪都是「傳檔→跑→帶回→人讀→填→傳回」，一輪半天起跳。
+- **B. 先以文件名稱預填 config，加 `--dry-run`：只定位、不操作，印出「找到 k 個、缺 m 個」**：對方跑一次就知道差哪幾個，缺的再從探測 JSON 補。
+
+**Decision**
+採用 **B**。`--dry-run` 是期二進入點的一個模式，由 `2e_確認控制項.bat` 觸發。
+
+**Rationale**
+把「人讀整棵樹」變成「程式回報缺哪幾個」。探測報告仍然要（它是修正缺項的依據），但不再是開工的前提——大部分控制項在第一輪就會對上，只剩幾個要查。
+
+`--dry-run` 也是驗證 pywinauto 看不看得見 AccuMark 的最快方法：若 Explorer 或 DCU 一個控制項都找不到，表示介面是自繪的、UIA 無能為力——那是唯一能讓整個方案翻船的未知數，五分鐘就驗得出來。
+
+**Consequences**
+- ✅ 期二不必等探測報告即可開工；探測報告變成修正輸入而非啟動條件
+- ✅ 回收物從「一棵樹」變成「一份缺項清單」
+- ⚠️ 預填的名稱可能因語系不同（中文介面的 AccuMark 會顯示「檔案」而非「File」）而全數落空——dry-run 會一次列出，改設定檔即可
+- ⚠️ `--dry-run` 本身**絕不 Invoke／SetValue／Select**，由靜態掃描與整合測試守護
+
+---
+
 ## 4. Data Design
 
 ### 4.1 `config.json`
@@ -424,11 +505,29 @@ AccuMark 匯出的檔名依版片編號產生。初版採取防禦姿態，對�
     "output_root": "%USERPROFILE%\\Desktop\\AccuMark匯出"
   },
 
+  // TD-4：每種格式「一個 model」會產出哪些副檔名。完成偵測的 files 模式以此算預期數。
+  "expected_outputs": {
+    "ZIP":  [".zip"],
+    "AAMA": [".dxf", ".rul"],
+    "ASTM": [".dxf"]
+  },
+
   "detection": {
-    "poll_interval_ms":      500,
-    "stable_samples":        3,
-    "timeout_sec":           300,
-    "verify_exclusive_lock": false     // TD-4 的選用二次確認
+    "poll_interval_ms": 500,
+    "stable_samples":   3,
+    "quiet_period_sec": 1.0,
+    "timeout_sec":      300
+  },
+
+  // ZIP 任務（Explorer → File → Export Zip）的完成對話框。OK 只按在它身上。
+  "zip": {
+    "complete_dialog": { "title_like": "*Process Complete*", "ok_button": "OK" }
+  },
+
+  // DXF 任務（DCU）。completion："files"（預期檔案數，預設）或 "results_text"
+  "dxf": {
+    "completion": "files",
+    "file_type_labels": { "AAMA": "AAMA", "ASTM": "ASTM" }   // File Type 下拉的顯示文字
   },
 
   "archival": {
@@ -442,36 +541,57 @@ AccuMark 匯出的檔名依版片編號產生。初版採取防禦姿態，對�
       "result_status": "FAILED_TARGET_EXISTS" }
   ],
 
+  // TD-10：以官方文件的顯示名稱預填；--dry-run 回報缺哪幾個再修
   "controls": {
-    // ⚠️ 期一探測完成後填入。期一之前保持空白。
-    "model_list":       { "strategy": "auto_id", "value": "" },
-    "export_zip":       { "strategy": "name",    "value": "" },
-    "export_aama":      { "strategy": "name",    "value": "" },
-    "export_astm":      { "strategy": "name",    "value": "" },
-    "dialog_path_box":  { "strategy": "auto_id", "value": "" },
-    "dialog_ok_button": { "strategy": "name",    "value": "" }
+    "explorer": {
+      "window":           { "strategy": "title_re",     "value": "AccuMark Explorer.*" },
+      "model_list":       { "strategy": "control_type", "value": "List" },
+      "menu_file":        { "strategy": "name",         "value": "File" },
+      "menu_export_zip":  { "strategy": "name",         "value": "Export Zip" },
+      "export_to_dialog": { "strategy": "title_re",     "value": "Export To.*" },
+      "export_to_path":   { "strategy": "control_type", "value": "Edit" },
+      "export_to_ok":     { "strategy": "name",         "value": "OK" },
+      "export_screen_ok": { "strategy": "name",         "value": "OK" }
+    },
+    "dcu": {
+      "window":           { "strategy": "title_re",     "value": "Data Conversion.*" },
+      "file_type":        { "strategy": "name",         "value": "File Type" },
+      "source_list":      { "strategy": "name",         "value": "Source File Name" },
+      "destination_path": { "strategy": "name",         "value": "Destination Path" },
+      "run_button":       { "strategy": "name",         "value": "Export" },
+      "results":          { "strategy": "name",         "value": "Results" }
+    }
   }
 }
 ```
 
-**`models: "SELECTED"` 的設計理由**：使用者希望不必維護 model 清單。若期一探測確認 Explorer 的清單控制項支援讀取選取狀態，使用者只要在 Explorer 框選要處理的 model 再雙擊 `.bat` 即可——設定檔完全不用碰，處理幾個都行。若探測顯示讀不到選取狀態，退回明確清單模式（設定格式已預留）。
+**`strategy` 可用值**：`name`（顯示名稱）、`auto_id`、`title_re`（視窗標題正規式）、`control_type`（該視窗下第一個此型別的控制項）、`index`。預填一律用 `name`／`title_re`／`control_type`——那是官方文件與標準 Windows 對話框能給的東西；`auto_id` 與 `index` 留給 dry-run 對不上時依探測報告補。
+
+**`models: "SELECTED"` 的設計理由**：使用者希望不必維護 model 清單。若探測確認 Explorer 的清單控制項支援讀取選取狀態，使用者只要在 Explorer 框選要處理的 model 再雙擊 `.bat` 即可——設定檔完全不用碰，處理幾個都行。若探測顯示讀不到選取狀態，退回明確清單模式（設定格式已預留）。
+
+**移除 `verify_exclusive_lock`**：TD-4 改以 UI 訊號為主之後，獨佔開檔這道「理論上更準但可能干擾寫入端」的檢查失去存在理由。
 
 ### 4.2 `state.json`（續跑狀態）
 
 ```jsonc
 {
-  "runId": "260830_1430",
+  "runId": "260902_1430",
+  "outputDir": "C:\\Users\\...\\Desktop\\AccuMark匯出_260902_1430",   // 續跑沿用
+  "models": ["<model1>", "<model2>", "<model3>", "<model4>"],
   "tasks": [
-    {
-      "model": "<model名1>", "format": "AAMA", "status": "SUCCESS",
-      "startedAt": "2026-08-30T14:30:12", "finishedAt": "2026-08-30T14:30:47",
-      "outputs": ["C:\\...\\<model名1>\\<model名1>_AAMA.dxf"]
-    }
+    { "kind": "ZIP", "model": "<model1>", "status": "SUCCESS",
+      "startedAt": "2026-09-02T14:30:12", "finishedAt": "2026-09-02T14:30:31",
+      "outputs": ["...\\<model1>\\<model1>.zip"] },
+    { "kind": "DXF", "format": "AAMA", "model": "<model1>", "status": "SUCCESS",
+      "startedAt": "2026-09-02T14:32:00", "finishedAt": "2026-09-02T14:32:09",
+      "outputs": ["...\\<model1>\\<model1>.dxf", "...\\<model1>\\<model1>.rul"] }
   ]
 }
 ```
 
-續跑判定：`status == "SUCCESS"` **且** `outputs` 中每個路徑皆存在 → 跳過。狀態檔說成功但檔案不見了，一律重跑（規格明訂）。
+**落點**：`scripts\runs\state.json`；日誌 `scripts\runs\日誌_<runId>.txt`。與 `probe-output\` 同一種模式——在交付資料夾自己的地盤裡。不放輸出資料夾（使用者會整包搬走或刪掉），不放暫存夾（會被清空）。
+
+**續跑**：`status == "SUCCESS"` 且 `outputs` 每個路徑皆存在 → 跳過。續跑沿用 `outputDir`，補跑的產出落在同一批資料夾。`--force` 把現有 `state.json` 改名為 `state_<runId>.json` 保留，開新批次、新資料夾。
 
 ### 4.3 任務狀態列舉
 
@@ -479,8 +599,9 @@ AccuMark 匯出的檔名依版片編號產生。初版採取防禦姿態，對�
 |---|---|---|
 | `SUCCESS` | 匯出並歸檔完成 | — |
 | `SKIPPED_ALREADY_DONE` | 續跑時跳過 | 否 |
-| `SKIPPED_NOT_FOUND` | model 在 Explorer 中不存在 | 否 |
-| `FAILED_TIMEOUT` | 逾時未產生檔案 | 否 |
+| `SKIPPED_NOT_FOUND` | model 在 Explorer／DCU 清單中不存在 | 否 |
+| `FAILED_SELECTION` | DCU 讀回選取不是恰好該一個 model（例如上次的選取殘留）；**未執行** | 否 |
+| `FAILED_TIMEOUT` | 完成訊號未到或檔案未齊；殘留搬至 `_逾時殘留\` | 否 |
 | `FAILED_TARGET_EXISTS` | 白名單對話框判定為覆蓋風險 | 否 |
 | `FAILED_MOVE` | 歸檔搬移失敗（磁碟／權限） | **是** |
 | `HALTED_UNKNOWN_DIALOG` | 遇到白名單外的視窗 | **是** |
@@ -632,25 +753,31 @@ accumark-batch-export\
 - [x] **AAMA 與 ASTM 檔名是否相同？** → 使用者判斷不會衝突。採信之，但保留條件式安全網（TD-8）：僅在目的地真的已有同名檔時才附加區別字尾並記 WARN。
 - [x] **輸出根目錄放哪？** → 固定桌面。`output_root` 仍保留為設定項（成本為零），預設 `%USERPROFILE%\Desktop\AccuMark匯出`。
 - [x] **目標機能否安裝 Python？** → 已具備。TD-1 因此翻轉為 Python + pywinauto。
+- [x] **三種匯出各自的路徑為何？** → ZIP：Explorer → File → Export Zip 精靈，結束跳「Process Complete」（官方 `AMX/Export.htm`）。AAMA／ASTM：Data Conversion Utility 表單（使用者確認）。
+- [x] **DCU 能不能一次多選省操作？** → 可以多選，**但多選會把全部 model 的裁片併進同一個 DXF**（使用者實務確認）。因此逐 model 單選，觸發前讀回選取狀態確認恰好一項（TD-9）。
+- [x] **匯出完成有沒有程式化訊號？** → 有。ZIP 為完成對話框；DCU 為 Results 窗格（可讀性待 dry-run）。TD-4 據此修訂。
+- [x] **續跑時輸出資料夾沿用或新建？** → 沿用 `state.json` 記錄的 `outputDir`；`--force` 才開新資料夾。
+- [x] **`state.json` 與日誌放哪？** → `scripts\runs\`，與 `probe-output\` 同一種模式（§4.2）。
+- [x] **一次匯出是否產生 `.dxf` 以外的附帶檔？** → 改為設定項 `expected_outputs`，預設 AAMA 附 `.rul`、ASTM 不附；回報表第 17–19 題確認後修正。
 
 ### 期零（A0）可解決
 
 - [ ] `pywinauto` 能否在目標機安裝？（否 → 走離線 wheel，仍否 → 啟用 TD-1 退路回 PowerShell）
 - [ ] 目標機的 Python 版本與呼叫方式（`py` 或 `python`）
 
-### 期一探測可解決
+### `--dry-run` 可解決（取代原「期一探測可解決」）
 
-- [ ] AccuMark Explorer 的 model 清單是什麼控制項型別？
-- [ ] **清單能否讀取「目前選取的項目」？**（決定 `models: "SELECTED"` 可否使用，否則退回明確清單）
-- [ ] 三種匯出各自的選單／按鈕路徑為何？是主選單、右鍵選單、還是工具列？
-- [ ] 匯出對話框的路徑欄位能否以 `ValuePattern` 設值？
-- [ ] 匯出對話框會不會記住上次的輸出路徑？
-- [ ] 關鍵控制項在 `backend="uia"` 下曝光是否足夠（若否 → 切 `backend="win32"`）
+- [ ] **Explorer 與 DCU 的控制項在 `backend="uia"` 下是否曝光？**（一個都找不到 → 介面自繪，方案翻船；此為唯一致命未知）
+- [ ] 介面語系：選單是 `File` 還是 `檔案`？（預填以英文為準，dry-run 一次列出落空項）
+- [ ] Explorer 清單能否讀取選取狀態？（決定 `models: "SELECTED"`）
+- [ ] Explorer 與 DCU 的清單是否支援 `Select`，且 `Select` 是否會清掉先前的選取？（否 → 讀回驗證會擋下，但每個 DXF 任務都會 `FAILED_SELECTION`；屆時討論改以 `RemoveFromSelection` 清空）
+- [ ] DCU 的 Results 窗格能否以 UIA 讀到文字？（否 → 維持 `completion: "files"`）
+- [ ] 「Export To」是否為標準資料夾選擇對話框？路徑欄能否 `ValuePattern` 設值？
 
 ### 需目標機實測
 
-- [ ] AccuMark 匯出時是否先建立零位元組佔位檔？（影響 TD-4 的取樣邏輯）
-- [ ] 一次匯出是否產生 `.dxf` 以外的附帶檔案（如 `.rul`）？（歸檔須全數搬移，邏輯已涵蓋，此處僅確認實情）
+- [ ] AccuMark 匯出時是否先建立零位元組佔位檔？（影響穩定判定）
+- [ ] DCU 單選一個 model 時，Destination File Name 是否自動帶入 model 名？（若需手填 → 腳本以 model 名填入；回報表第 10 題）
 
 ---
 
@@ -661,3 +788,4 @@ accumark-batch-export\
 | 2026-08-30 | 初版。Phase 1 確認四份為四個獨立 model、匯出動作相同；Phase 0 確認無可用官方 API |
 | 2026-08-30 | 設計核准。依使用者要求新增「全部包成 `.bat` 純雙擊」→ 新增 TD-7、`operability` 兩條 Requirement（7 個 Scenario）。Scenario 總數 25 → 32 |
 | 2026-08-30 | **TD-1 翻轉**：使用者確認目標機已有 Python → 技術棧由 PowerShell 改為 Python + pywinauto，PowerShell 降為退路。新增期零任務 A0（相依驗證）與離線 wheel 預案。連帶更新 §2 元件表與流程、§4 設定 schema、§6 技術棧與目錄、§9 測試策略（Pester → pytest）、TD-7 的 `.bat` 骨架。<br>**新增 TD-8**：歸檔改為保留原檔名、僅衝突時改名。<br>**新增 `models: "SELECTED"`**：免維護 model 清單，改讀 Explorer 選取項。<br>交付物新增「完整使用手冊」。 |
+| 2026-09-02 | **期二設計改版**。查得官方文件（Export Zip 結束跳「Process Complete」；DCU 為表單）、使用者確認 DXF 走 DCU、且**多選會把裁片併進同一個 DXF** → 新增 **TD-9**（DXF 逐 model 逐格式、觸發前讀回選取恰好一項）、**TD-10**（預填 `controls` + `--dry-run`）；**TD-4 修訂**為 UI 訊號為主、檔案穩定為輔；§2.1／§2.3／§4／§12 更新。`config` 新增 `expected_outputs`／`zip`／`dxf`／巢狀 `controls`（explorer／dcu）、`quiet_period_sec`，策略新增 `title_re`／`control_type`，移除 `verify_exclusive_lock`；狀態新增 `FAILED_SELECTION`；逾時殘留改搬至 `_逾時殘留\` 不刪。兩個待拍板決定（續跑資料夾、state 落點）定案。Spec：batch-export 重寫「每個任務恰含一個 model」「完成偵測」、新增「`--dry-run`」；file-archival 新增主檔名防線兩條。tasks.md 階段 D 重排為 D0–D6，不再以探測報告為開工前提。 |

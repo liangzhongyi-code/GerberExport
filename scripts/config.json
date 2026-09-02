@@ -1,28 +1,53 @@
 {
-  "_說明": "AccuMark 批次匯出設定。以底線開頭的欄位是註解，程式會忽略。修改後直接存檔即可，不用重開任何東西。",
+  "_說明": "AccuMark 批次匯出設定。以底線開頭的欄位是註解，程式會忽略。修改後直接存檔即可，不用重開任何東西。每個欄位都是必填，少一個程式會在啟動時指名哪一個。",
 
   "_models": "要處理哪些 model。\"SELECTED\" = 處理你在 AccuMark Explorer 中框選的項目（推薦，設定檔完全不用維護）。也可以改成明確清單，例如 [\"A-1234\", \"A-1235\"]。",
   "models": "SELECTED",
 
-  "_formats": "要匯出哪些格式。可用：ZIP（AccuMark 版型包）、AAMA、ASTM。不要重複。",
+  "_formats": "要匯出哪些格式。可用：ZIP（AccuMark 版型包，走 Explorer 的 File → Export Zip）、AAMA、ASTM（走 Data Conversion Utility）。不要重複。拿掉某個格式時，底下 expected_outputs 與 dxf.file_type_labels 對應的那一項也要一併拿掉。",
   "formats": ["ZIP", "AAMA", "ASTM"],
 
   "paths": {
-    "_說明": "temp_dir 是匯出的落點，每次匯出完會立刻搬空；output_root 是歸檔目的地。兩者不能相同。",
+    "_說明": "temp_dir 是匯出的落點，每次匯出完會立刻搬空；output_root 是歸檔目的地。兩者不能相同，也不能一個放在另一個裡面——暫存夾會被反覆清空，套在一起等於邊產出邊刪。",
     "temp_dir": "%USERPROFILE%\\Desktop\\_accumark_temp",
     "output_root": "%USERPROFILE%\\Desktop\\AccuMark匯出"
   },
 
+  "expected_outputs": {
+    "_說明": "每種格式「一個 model」會產出哪些副檔名。DXF 任務靠這裡算「檔案齊了沒」：填少了會提早判定完成、搬走半套檔案；填多了會空等到逾時。什麼時候要改：回報表第 17–19 題確認 AAMA 是否真的附 .rul、ASTM 是否只有 .dxf 之後，照實際結果修。formats 裡每個格式都要有一項。",
+    "ZIP": [".zip"],
+    "AAMA": [".dxf", ".rul"],
+    "ASTM": [".dxf"]
+  },
+
   "detection": {
-    "_說明": "怎麼判斷一次匯出真的結束了。不用固定等待秒數，而是看檔案大小是否穩定下來。裁片多的 model 匯出久一點也不會被誤判失敗。",
+    "_說明": "怎麼判斷一次匯出真的結束了。先等 AccuMark 自己的完成訊號（ZIP 是「Process Complete」對話框，DXF 是檔案數到齊），訊號到了才開始看檔案大小是否穩定，兩關都過才算完成。不用固定等待秒數，裁片多的 model 匯出久一點也不會被誤判失敗。",
     "_poll_interval_ms": "每隔幾毫秒看一次暫存夾。",
     "poll_interval_ms": 500,
     "_stable_samples": "連續幾次大小不變才算寫完。至少 2，調高會更保險但每次多等一點。",
     "stable_samples": 3,
-    "_timeout_sec": "等多久還沒出現檔案就判定這次匯出失敗，跳過並繼續下一個。",
-    "timeout_sec": 300,
-    "_verify_exclusive_lock": "額外用獨佔開檔再確認一次。預設關閉，需在目標機實測確認不會干擾 AccuMark 寫檔後才建議開啟。",
-    "verify_exclusive_lock": false
+    "_quiet_period_sec": "檔案穩定之後再多等幾秒才動手搬，給 AccuMark 收尾（例如最後才寫出 .rul）。0 表示不多等。目標機上若發現偶爾少一個附帶檔，先把這個調大。",
+    "quiet_period_sec": 1.0,
+    "_timeout_sec": "等多久完成訊號還沒來、或檔案還沒齊，就判定這次匯出失敗。殘留檔案會搬到輸出資料夾的 _逾時殘留 底下（不會刪除），然後繼續下一個任務。",
+    "timeout_sec": 300
+  },
+
+  "zip": {
+    "_說明": "ZIP 任務（AccuMark Explorer → File → Export Zip）結束時跳出的完成對話框。腳本只會對「這一個」對話框按 OK，而且要等檔案穩定之後才按。什麼時候要改：AccuMark 升級或介面換成中文，對話框的標題或按鈕文字變了。",
+    "complete_dialog": {
+      "_title_like": "完成對話框的標題，* 代表任意文字。不能整個都是萬用字元（例如只填 *），那樣任何視窗都會被當成完成對話框。",
+      "title_like": "*Process Complete*",
+      "_ok_button": "要按的那顆按鈕上的文字。",
+      "ok_button": "OK"
+    }
+  },
+
+  "dxf": {
+    "_說明": "AAMA / ASTM 任務（Data Conversion Utility）。每個 model 各跑一次、一次只選一個 model，選完會先讀回確認只有它被選到才執行——多選會把所有 model 的裁片併進同一個 DXF。",
+    "_completion": "怎麼判斷 DCU 做完了。files = 暫存夾檔案數達到 expected_outputs 的數量（預設，只靠設定檔就能算）；results_text = 等 DCU 的 Results 窗格出現文字（要先用 dry-run 確認 controls.dcu.results 讀得到才改用）。",
+    "completion": "files",
+    "_file_type_labels": "DCU 的 File Type 下拉選單裡各格式顯示的文字。formats 裡每個 DXF 格式（ZIP 以外）都要有一項。什麼時候要改：下拉選單的字跟這裡不一樣（例如寫成 AAMA/DXF）。",
+    "file_type_labels": { "AAMA": "AAMA", "ASTM": "ASTM" }
   },
 
   "archival": {
@@ -33,7 +58,7 @@
     "output_dir_pattern": "{root}_{yymmdd}_{HHMM}"
   },
 
-  "_dialog_whitelist": "遇到彈出視窗時的處置規則。清單裡沒列到的視窗一律停機並記錄，絕不亂按——盲目按 Enter 可能誤觸「是，覆蓋」而永久毀掉檔案。action 只接受 Cancel / Close / No 這類不會造成變更的動作。",
+  "_dialog_whitelist": "遇到彈出視窗時的處置規則。清單裡沒列到的視窗一律停機並記錄，絕不亂按——盲目按 Enter 可能誤觸「是，覆蓋」而永久毀掉檔案。action 只接受 Cancel / Close / No 這類不會造成變更的動作；result_status 是這個任務要記成哪種狀態，必須是日誌裡的狀態代碼之一（例如 FAILED_TARGET_EXISTS）。",
   "dialog_whitelist": [
     {
       "title_like": "*已存在*",
@@ -43,12 +68,26 @@
   ],
 
   "controls": {
-    "_說明": "AccuMark 介面上各個控制項的定位方式。期一探測（1_執行探測.bat）完成後才會填入，在那之前 value 保持空字串。strategy 可用 auto_id / name / index。",
-    "model_list": { "strategy": "auto_id", "value": "" },
-    "export_zip": { "strategy": "name", "value": "" },
-    "export_aama": { "strategy": "name", "value": "" },
-    "export_astm": { "strategy": "name", "value": "" },
-    "dialog_path_box": { "strategy": "auto_id", "value": "" },
-    "dialog_ok_button": { "strategy": "name", "value": "" }
+    "_說明": "AccuMark 介面上各個控制項怎麼找。目前是照官方文件的英文名稱預填，先跑 dry-run 看哪幾個找不到，再只改那幾個。strategy 可用：name（畫面上顯示的文字）、auto_id（探測報告裡的 automation_id）、title_re（視窗標題的正規表示式，任意文字寫 .*，只給 window 用）、control_type（該視窗裡第一個這種型別的控制項）、index（探測報告裡的序號，value 要填數字）。什麼時候要改：介面是中文（File 會變成「檔案」）、AccuMark 升級、或 dry-run 說找不到。",
+    "explorer": {
+      "_說明": "AccuMark Explorer 這一半，ZIP 任務用。window 是主視窗標題；model_list 是 model 清單；menu_file / menu_export_zip 是 File 選單與底下的 Export Zip；export_to_dialog 是接著跳出的「Export To」資料夾對話框，export_to_path 是裡面的路徑欄、export_to_ok 是它的 OK；export_screen_ok 是最後匯出畫面的 OK。",
+      "window":           { "strategy": "title_re",     "value": "AccuMark Explorer.*" },
+      "model_list":       { "strategy": "control_type", "value": "List" },
+      "menu_file":        { "strategy": "name",         "value": "File" },
+      "menu_export_zip":  { "strategy": "name",         "value": "Export Zip" },
+      "export_to_dialog": { "strategy": "title_re",     "value": "Export To.*" },
+      "export_to_path":   { "strategy": "control_type", "value": "Edit" },
+      "export_to_ok":     { "strategy": "name",         "value": "OK" },
+      "export_screen_ok": { "strategy": "name",         "value": "OK" }
+    },
+    "dcu": {
+      "_說明": "Data Conversion Utility 這一半，AAMA / ASTM 任務用。window 是 DCU 視窗標題；file_type 是 File Type 下拉；source_list 是 Source File Name 清單（一次只選一個 model）；destination_path 是 Destination Path 欄；run_button 是執行鈕；results 是 Results 窗格（completion 設 results_text 時才會用到）。",
+      "window":           { "strategy": "title_re", "value": "Data Conversion.*" },
+      "file_type":        { "strategy": "name",     "value": "File Type" },
+      "source_list":      { "strategy": "name",     "value": "Source File Name" },
+      "destination_path": { "strategy": "name",     "value": "Destination Path" },
+      "run_button":       { "strategy": "name",     "value": "Export" },
+      "results":          { "strategy": "name",     "value": "Results" }
+    }
   }
 }

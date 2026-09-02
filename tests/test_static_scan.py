@@ -39,10 +39,24 @@ BANNED_INPUT_APIS = (
     "mouse_event",   # user32 舊版合成滑鼠事件
     "SendInput",     # user32 合成鍵盤／滑鼠輸入
     "keybd_event",   # user32 舊版合成鍵盤事件
+    "SetForegroundWindow",  # user32：把視窗拉到前景，等於搶走使用者的鍵盤焦點
     "click_input",   # pywinauto：移動實體滑鼠去點，與 click() 只差三個字
     "type_keys",     # pywinauto：搶前景焦點後逐鍵送出
     "send_keys",     # pywinauto：全域鍵盤注入，使用者正在打字就會被插隊
     "pyautogui",     # 整個套件都建立在實體輸入上，沒有安全的用法
+    # ── D3 補入：讀 pywinauto 0.6.9 原始碼後確認會碰實體輸入的名稱 ──
+    "set_focus",     # pywinauto：SetForegroundWindow 的包裝；便利方法內部常偷叫它
+    "set_window_text",  # pywinauto EditWrapper：內部先 set_focus 再 SetValue
+    "menu_select",   # pywinauto：MenuWrapper._activate 對每一層選單 set_focus
+    "press_mouse",   # pywinauto：press_mouse_input 系列，實體按下
+    "release_mouse",  # pywinauto：release_mouse_input
+    "move_mouse",    # pywinauto：move_mouse_input，實體移動游標
+    "drag_mouse",    # pywinauto：drag_mouse_input
+    "wheel_mouse",   # pywinauto：wheel_mouse_input
+    "pywinauto.mouse",     # 整個模組都是實體滑鼠
+    "pywinauto.keyboard",  # 整個模組都是實體鍵盤
+    "import mouse",        # from pywinauto import mouse
+    "import keyboard",     # from pywinauto import keyboard
 )
 
 # `sleep(` 後面直接接數字字面值＝寫死的等待。TD-4 明訂等待間隔一律從設定檔

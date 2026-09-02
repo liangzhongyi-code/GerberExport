@@ -8,6 +8,14 @@ TD-8 的核心：**預設保留 AccuMark 的原始檔名**，只有在目的地�
 同名檔時才加區別字尾。使用者每天在看這些檔名，比預防性設計更清楚實情；
 但採信他的判斷不等於拿掉安全網——判斷落空時保留兩個檔案並記 WARN，
 而不是靜默覆蓋。
+
+D1 補的三塊：
+- 撞名比對不分大小寫。Windows 檔案系統把 `A.dxf` 與 `a.dxf` 當同一個檔，
+  比對若分大小寫，shutil.move 會靜默覆蓋——正是 TD-8 要擋的那種無聲失敗。
+- TD-9 防線 check_ownership()：任務逐 model，暫存夾裡的東西理應全屬它；
+  主檔名對不上的要被看見，不能靜默歸進錯的資料夾。
+- 殘留物落點 residue_dir()：`_未歸類\<任務>\` 與 `_逾時殘留\<任務>\`，
+  搬移仍走 plan() + execute()，所以「絕不覆蓋、保留原檔名」一體適用。
 """
 
 import hashlib
@@ -334,3 +342,300 @@ def test_nothing_is_moved_when_one_destination_exists(tmp_path):
         arc.execute(moves, source_dir=src)
     assert (src / "a.dxf").is_file()
     assert (dest / "b.dxf").read_bytes() == b"original"
+
+
+# ── 大小寫：Windows 檔案系統不分，撞名比對也不能分 ───────────────────
+#
+# 這一段全走純函式 plan()，不靠檔案系統——在 Windows 上用真檔案測
+# 「A.DXF 撞 a.dxf」，檔案系統自己就會把兩者當同一個，測不出比對邏輯
+# 到底有沒有分大小寫。
+
+
+def test_conflict_detected_when_existing_differs_only_in_case():
+    """
+    目的地有 a.dxf、新來的是 A.DXF：Windows 會把它們當同一個檔，
+    比對若分大小寫就會判「沒撞」，接著 shutil.move 靜默覆蓋。
+    """
+    moves = plan(["A.DXF"], fmt="ASTM", existing=["a.dxf"])
+    assert moves[0].renamed is True
+    assert moves[0].reason
+
+
+def test_conflict_detected_case_insensitively_within_same_batch():
+    """同一批的兩個產出僅大小寫不同，也算撞名。"""
+    moves = plan(["A.DXF", "a.dxf"], fmt="AAMA")
+    assert len({n.casefold() for n in names(moves)}) == 2
+
+
+def test_fallback_names_are_also_checked_case_insensitively():
+    """
+    加了字尾之後的候選名一樣要不分大小寫地比：目的地已有 a_astm.dxf，
+    A_ASTM.DXF 就不能用，得繼續往序號退。
+    """
+    moves = plan(["A.DXF"], fmt="ASTM", existing=["a.dxf", "a_astm.dxf"])
+    assert names(moves) == ["A_ASTM_2.DXF"]
+
+
+def test_original_case_is_preserved_when_no_conflict():
+    """比對不分大小寫，但輸出的檔名要逐字保留 AccuMark 給的大小寫。"""
+    moves = plan(["A-1234.DXF"])
+    assert names(moves) == ["A-1234.DXF"]
+
+
+def test_original_case_is_preserved_when_renamed():
+    """改名時也只加字尾，不能順手把大小寫「正規化」掉。"""
+    moves = plan(["A-1234.DXF"], fmt="ASTM", existing=["a-1234.dxf"])
+    assert names(moves) == ["A-1234_ASTM.DXF"]
+
+
+@pytest.mark.parametrize("incoming", ["a.dxf", "A.DXF", "A.dxf", "a.DXF"])
+def test_plan_never_targets_an_existing_file_regardless_of_case(incoming):
+    existing = {"A.dxf", "a_ASTM.DXF", "A_astm_2.dxf"}
+    moves = plan([incoming], fmt="ASTM", existing=existing)
+    assert moves[0].dest_path.name.casefold() not in {e.casefold() for e in existing}
+
+
+def test_execute_refuses_case_variant_of_existing_file(tmp_path):
+    """
+    最後一道防線也要不分大小寫：plan 沒被告知 existing 時，
+    execute 不能讓 A.DXF 蓋掉目的地的 a.dxf。
+    """
+    src = make_temp_export(tmp_path, **{"A.DXF": b"new"})
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "a.dxf").write_bytes(b"original")
+    with pytest.raises(arc.ArchivalError, match="a.dxf"):
+        arc.execute(plan(["A.DXF"], dest=dest), source_dir=src)
+    assert (dest / "a.dxf").read_bytes() == b"original", "既有檔案被覆蓋了"
+    assert (src / "A.DXF").is_file()
+
+
+def test_execute_case_check_does_not_rely_on_exists(tmp_path, monkeypatch):
+    """
+    在區分大小寫的檔案系統上（Linux CI、開了大小寫敏感旗標的 NTFS 目錄），
+    dest_path.exists() 看不見「僅大小寫不同」的既有檔。這裡把 exists()
+    換成嚴格比對名稱的版本來模擬那種檔案系統，證明預檢不是靠它擋的——
+    否則在 Windows 上跑測試永遠是綠的，換台機器就會靜默覆蓋。
+    """
+    import os
+
+    def strict_exists(self, *args, **kwargs):
+        parent = os.path.dirname(str(self)) or "."
+        return os.path.isdir(parent) and os.path.basename(str(self)) in os.listdir(parent)
+
+    monkeypatch.setattr(Path, "exists", strict_exists)
+
+    src = make_temp_export(tmp_path, **{"A.DXF": b"new"})
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "a.dxf").write_bytes(b"original")
+    with pytest.raises(arc.ArchivalError):
+        arc.execute(plan(["A.DXF"], dest=dest), source_dir=src)
+    assert (dest / "a.dxf").read_bytes() == b"original", "既有檔案被覆蓋了"
+    assert (src / "A.DXF").is_file()
+
+
+def test_execute_refuses_batch_whose_targets_differ_only_in_case(tmp_path):
+    """
+    同一批兩個目的名僅大小寫不同：預檢時兩者都不存在，若不互相比對，
+    第一個搬進去之後第二個就會蓋掉它。這種批次應該整批拒絕、一個都不搬。
+    """
+    src = make_temp_export(tmp_path, **{"x1.dxf": b"1", "x2.dxf": b"2"})
+    dest = tmp_path / "out"
+    moves = (
+        arc.PlannedMove(source_name="x1.dxf", dest_path=dest / "A.DXF", renamed=False),
+        arc.PlannedMove(source_name="x2.dxf", dest_path=dest / "a.dxf", renamed=False),
+    )
+    with pytest.raises(arc.ArchivalError):
+        arc.execute(moves, source_dir=src)
+    assert (src / "x1.dxf").is_file() and (src / "x2.dxf").is_file()
+    assert not dest.exists() or list(dest.iterdir()) == []
+
+
+# ── TD-9 防線：產出歸屬 ──────────────────────────────────────────────
+#
+# 任務逐 model，暫存夾裡的東西理應全屬當前 model。這個檢查不是拿來推
+# 歸屬的（結構已保證），而是防線：DCU 若額外輸出、或選取殘留讓別的
+# model 混進來，要被看見，而不是靜默歸進錯的資料夾。
+
+
+def test_ownership_splits_files_by_stem():
+    owned, foreign = arc.check_ownership(
+        ["A-1234.dxf", "A-1234.rul", "B-9.dxf"], "A-1234"
+    )
+    assert owned == ("A-1234.dxf", "A-1234.rul")
+    assert foreign == ("B-9.dxf",)
+
+
+def test_ownership_ignores_case():
+    """AccuMark 吐出來的大小寫未必跟清單上的一致，不能因此判成外來檔。"""
+    owned, foreign = arc.check_ownership(["a-1234.DXF", "A-1234.Rul"], "A-1234")
+    assert owned == ("a-1234.DXF", "A-1234.Rul")
+    assert foreign == ()
+
+
+def test_ownership_strips_only_the_last_extension():
+    """主檔名的定義與改名邏輯一致：只去掉最後一個副檔名。"""
+    owned, foreign = arc.check_ownership(["A-1234.tar.gz"], "A-1234.tar")
+    assert owned == ("A-1234.tar.gz",)
+    owned, foreign = arc.check_ownership(["A-1234.tar.gz"], "A-1234")
+    assert foreign == ("A-1234.tar.gz",)
+
+
+def test_ownership_requires_exact_stem_not_prefix():
+    """
+    前綴相同不算：A-12345 是另一個 model，A-1234_ASTM 不是這次匯出該有的名字。
+    用 startswith 比對會把這些全放進去，防線就形同虛設。
+    """
+    owned, foreign = arc.check_ownership(
+        ["A-12345.dxf", "A-1234_ASTM.dxf", "A-1234-AAMA.dxf", "xA-1234.dxf"], "A-1234"
+    )
+    assert owned == ()
+    assert len(foreign) == 4
+
+
+def test_ownership_file_without_extension():
+    owned, foreign = arc.check_ownership(["A-1234", "A-1234.dxf"], "A-1234")
+    assert owned == ("A-1234", "A-1234.dxf")
+    assert foreign == ()
+
+
+def test_ownership_preserves_input_order_and_returns_tuples():
+    """回傳要能直接餵給 plan()，且日誌列出的順序要跟暫存夾看到的一致。"""
+    owned, foreign = arc.check_ownership(
+        ["z.dxf", "A-1234.rul", "y.dxf", "A-1234.dxf"], "A-1234"
+    )
+    assert isinstance(owned, tuple) and isinstance(foreign, tuple)
+    assert owned == ("A-1234.rul", "A-1234.dxf")
+    assert foreign == ("z.dxf", "y.dxf")
+
+
+def test_ownership_of_empty_temp_dir():
+    assert arc.check_ownership([], "A-1234") == ((), ())
+
+
+def test_ownership_rejects_empty_model():
+    """空的 model 名稱是呼叫端的 bug，要炸出來，而不是把所有檔案都判成外來。"""
+    for bad in ("", "   "):
+        with pytest.raises(arc.ArchivalError):
+            arc.check_ownership(["A-1234.dxf"], bad)
+
+
+# ── 殘留物落點 ───────────────────────────────────────────────────────
+#
+# 兩種殘留物：主檔名不符的（_未歸類）、逾時的（_逾時殘留）。都不刪、
+# 都不留在暫存夾、都不進 model 資料夾。搬移沿用 plan() + execute()。
+
+
+def test_residue_dirnames_are_fixed_strings():
+    """資料夾名寫進規格與使用手冊，改了使用者就找不到東西。"""
+    assert arc.UNCLASSIFIED_DIRNAME == "_未歸類"
+    assert arc.TIMEOUT_RESIDUE_DIRNAME == "_逾時殘留"
+
+
+def test_task_label_format():
+    assert arc.task_label("AAMA", "A-1234") == "AAMA_A-1234"
+    assert arc.task_label("ZIP", "A-1234") == "ZIP_A-1234"
+
+
+def test_task_label_rejects_illegal_characters():
+    """任務標籤直接當資料夾名，非法字元與路徑穿越要用 model_dir 同一套規則擋。"""
+    for bad in ("../evil", "a/b", "a:b", "a*b", "a.", " a"):
+        with pytest.raises(arc.ArchivalError):
+            arc.task_label("AAMA", bad)
+    with pytest.raises(arc.ArchivalError):
+        arc.task_label("A/B", "A-1234")
+
+
+def test_task_label_rejects_empty_parts():
+    for fmt, model in (("", "A-1234"), ("AAMA", ""), ("AAMA", "  ")):
+        with pytest.raises(arc.ArchivalError):
+            arc.task_label(fmt, model)
+
+
+def test_residue_dir_layout():
+    out = Path(r"C:\out\260902_1430")
+    assert arc.residue_dir(out, arc.UNCLASSIFIED_DIRNAME, "AAMA_A-1234") == (
+        out / "_未歸類" / "AAMA_A-1234"
+    )
+    assert arc.residue_dir(out, arc.TIMEOUT_RESIDUE_DIRNAME, "ZIP_A-1234") == (
+        out / "_逾時殘留" / "ZIP_A-1234"
+    )
+
+
+@pytest.mark.parametrize("kind", ["", "_其他", "AAMA", "未歸類", "_未歸類/", "A-1234"])
+def test_residue_dir_rejects_unknown_kind(kind):
+    """
+    kind 只有兩個合法值。放任意字串進來，殘留物會散落在自訂資料夾裡，
+    使用者依手冊找 `_未歸類\\` 會找不到。
+    """
+    with pytest.raises(arc.ArchivalError):
+        arc.residue_dir(Path(r"C:\out"), kind, "AAMA_A-1234")
+
+
+def test_residue_dir_rejects_illegal_label():
+    for bad in ("", "../x", "a/b"):
+        with pytest.raises(arc.ArchivalError):
+            arc.residue_dir(Path(r"C:\out"), arc.UNCLASSIFIED_DIRNAME, bad)
+
+
+def test_residue_dirs_of_different_tasks_and_kinds_do_not_overlap():
+    """同一 model 的 AAMA 與 ASTM 殘留、以及未歸類與逾時殘留，都要分開放。"""
+    out = Path(r"C:\out")
+    dirs = {
+        arc.residue_dir(out, arc.UNCLASSIFIED_DIRNAME, arc.task_label("AAMA", "A-1234")),
+        arc.residue_dir(out, arc.UNCLASSIFIED_DIRNAME, arc.task_label("ASTM", "A-1234")),
+        arc.residue_dir(out, arc.TIMEOUT_RESIDUE_DIRNAME, arc.task_label("AAMA", "A-1234")),
+        arc.residue_dir(out, arc.TIMEOUT_RESIDUE_DIRNAME, arc.task_label("ZIP", "A-1234")),
+    }
+    assert len(dirs) == 4
+    assert all(d.parent.parent == out for d in dirs)
+
+
+def test_foreign_files_do_not_land_in_model_dir_and_keep_names(tmp_path):
+    """
+    端到端：check_ownership 分流 → 各自 plan → 各自 execute。
+    外來檔要到 `_未歸類\\<任務>\\`，原檔名不變，不進 model 資料夾，
+    也不留在暫存夾；owned 檔照常歸進 model 資料夾。
+    """
+    src = make_temp_export(
+        tmp_path, **{"A-1234.dxf": b"a", "A-1234.rul": b"r", "B-9.dxf": b"b"}
+    )
+    out = tmp_path / "out"
+    listing = sorted(p.name for p in src.iterdir())
+
+    owned, foreign = arc.check_ownership(listing, "A-1234")
+    assert foreign == ("B-9.dxf",)
+
+    owned_dir = arc.model_dir(out, "A-1234")
+    foreign_dir = arc.residue_dir(
+        out, arc.UNCLASSIFIED_DIRNAME, arc.task_label("AAMA", "A-1234")
+    )
+    arc.execute(plan(owned, dest=owned_dir), source_dir=src)
+    arc.execute(plan(foreign, dest=foreign_dir), source_dir=src)
+
+    assert sorted(p.name for p in owned_dir.iterdir()) == ["A-1234.dxf", "A-1234.rul"]
+    assert [p.name for p in foreign_dir.iterdir()] == ["B-9.dxf"]
+    assert (foreign_dir / "B-9.dxf").read_bytes() == b"b"
+    assert not (owned_dir / "B-9.dxf").exists()
+    assert foreign_dir != owned_dir and owned_dir not in foreign_dir.parents
+    assert list(src.iterdir()) == []
+
+
+def test_timeout_residue_keeps_every_file_and_name(tmp_path):
+    """
+    逾時時暫存夾裡有什麼就搬什麼——包括寫到一半的檔——到 `_逾時殘留\\<任務>\\`，
+    MUST NOT 刪除。搬過去的是證據，使用者要靠它判斷發生了什麼。
+    """
+    src = make_temp_export(tmp_path, **{"A-1234.dxf": b"partial", "A-1234.rul": b""})
+    out = tmp_path / "out"
+    residue = arc.residue_dir(
+        out, arc.TIMEOUT_RESIDUE_DIRNAME, arc.task_label("AAMA", "A-1234")
+    )
+    listing = sorted(p.name for p in src.iterdir())
+    arc.execute(plan(listing, dest=residue), source_dir=src)
+
+    assert sorted(p.name for p in residue.iterdir()) == ["A-1234.dxf", "A-1234.rul"]
+    assert (residue / "A-1234.dxf").read_bytes() == b"partial"
+    assert not (arc.model_dir(out, "A-1234")).exists()
+    assert list(src.iterdir()) == []

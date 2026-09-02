@@ -10,6 +10,18 @@
   * 盲按 Enter 而覆蓋掉版型檔 → 可能重做一整天的工作
 
 因此採白名單制：**預設一律視為未知**，只有明確列出的才處理。
+
+判定順序（design.md §2.3）：
+  1. 預期完成對話框（ZIP 任務等的「Process Complete」）→ 完成訊號，不給動作
+  2. 白名單 → 回該條規則的動作（限 Cancel／Close／No）
+  3. 其餘 → 未知，停機
+
+完成對話框刻意不放進白名單：白名單是「遇到不認識的東西要怎麼退」，
+完成對話框是「這一步本來就該按的那個鈕」。OK 由流程在確認檔案穩定後
+自己按，守衛只負責認出它。
+
+pywinauto 對某些視窗的標題／內文／按鈕文字會回 None。守衛一律把 None
+當空字串處理——停機是要留下使用者能拿去擴充白名單的資訊，不是 traceback。
 """
 
 from dataclasses import dataclass
@@ -23,6 +35,8 @@ from typing import Callable, Optional, Sequence, Tuple
 from .config import VALID_ACTIONS, DialogRule
 
 HALT_STATUS = "HALTED_UNKNOWN_DIALOG"
+UNTITLED = "(無標題)"
+UNLABELLED_BUTTON = "(無文字)"
 
 
 class UnsafeActionError(RuntimeError):
@@ -31,18 +45,35 @@ class UnsafeActionError(RuntimeError):
 
 @dataclass(frozen=True)
 class DialogInfo:
-    title: str
-    text: str = ""
-    buttons: Tuple[str, ...] = ()
+    """
+    三個欄位都可能是 None：pywinauto 對某些視窗讀不到文字時就回 None，
+    而不是空字串。
+    """
+
+    title: Optional[str]
+    text: Optional[str] = ""
+    buttons: Optional[Tuple[Optional[str], ...]] = ()
 
 
 @dataclass(frozen=True)
 class Verdict:
+    """
+    known=False              → 未知，停機（action 為空）
+    known=True, completion   → 預期的完成對話框，不帶動作，流程自己決定何時按 OK
+    known=True, 非 completion → 白名單命中，照 action 退場
+    """
+
     known: bool
     action: str
     result_status: str
     description: str = ""
     rule_index: int = -1
+    completion: bool = False
+
+
+def _flatten(value: Optional[str]) -> str:
+    """None 視為空字串；換行與連續空白壓成單一空格，日誌一筆一行。"""
+    return " ".join((value or "").split())
 
 
 def describe(dialog: DialogInfo) -> str:
@@ -52,12 +83,17 @@ def describe(dialog: DialogInfo) -> str:
     內容刻意涵蓋標題、內文與每一顆按鈕——這正好是使用者擴充白名單
     所需要的全部資訊，讓「遇到未知情況」自然演化成「白名單長大一點」，
     而不需要開發者介入。
+
+    任何欄位是 None 都不能讓這裡掛掉：這個函式是在停機路徑上被呼叫的，
+    它一掛，停機就從「留下線索」變成「留下 traceback」。
     """
-    parts = ["標題=" + " ".join(dialog.title.split())]
-    if dialog.text:
-        parts.append("內文=" + " ".join(dialog.text.split()))
+    parts = ["標題=" + (_flatten(dialog.title) or UNTITLED)]
+    text = _flatten(dialog.text)
+    if text:
+        parts.append("內文=" + text)
     if dialog.buttons:
-        parts.append("按鈕=" + "/".join(b.strip() for b in dialog.buttons))
+        labels = [_flatten(b) or UNLABELLED_BUTTON for b in dialog.buttons]
+        parts.append("按鈕=" + "/".join(labels))
     return "  ".join(parts)
 
 
@@ -68,6 +104,35 @@ def _unknown(description: str) -> Verdict:
         result_status=HALT_STATUS,
         description=description,
     )
+
+
+def _completion(dialog: DialogInfo) -> Verdict:
+    # 不給 action、不給 result_status：按 OK 的時機（訊號到了 + 檔案穩定）
+    # 與最終狀態（SUCCESS 或逾時）都由流程決定，守衛只回報「看到了」。
+    return Verdict(
+        known=True,
+        action="",
+        result_status="",
+        description=describe(dialog),
+        completion=True,
+    )
+
+
+def match_completion(dialog: DialogInfo, title_like: Optional[str]) -> bool:
+    """
+    純函式：這個對話框是不是本任務宣告的完成對話框？
+
+    比對方式與白名單一致（glob、不分大小寫）。兩個刻意的「不算」：
+      * 沒宣告樣式（None 或空白）→ 永遠不算，DXF 任務本來就沒有完成對話框
+      * 視窗沒有標題 → 永遠不算，就算樣式寬鬆到「*」也一樣——
+        對一個不明視窗按 OK 正是 TD-5 要杜絕的路徑
+    """
+    if not title_like or not title_like.strip():
+        return False
+    title = dialog.title or ""
+    if not title.strip():
+        return False
+    return fnmatchcase(title.lower(), title_like.lower())
 
 
 def match_whitelist(
@@ -101,12 +166,32 @@ def match_whitelist(
     return _unknown(describe(dialog))
 
 
+def classify(
+    dialog: DialogInfo,
+    rules: Sequence[DialogRule],
+    expected_completion: Optional[str] = None,
+) -> Verdict:
+    """
+    純函式：完成對話框 → 白名單 → 未知，依這個順序判定。
+
+    完成對話框排在白名單前面，是因為使用者可能在白名單放一條寬鬆規則
+    （例如「*」）；若讓它先攔到完成對話框，會對一次本來成功的匯出按 Cancel。
+    """
+    if match_completion(dialog, expected_completion):
+        return _completion(dialog)
+    return match_whitelist(dialog, rules)
+
+
 def check_foreground(
     detect_fn: Callable[[], Optional[DialogInfo]],
     rules: Sequence[DialogRule],
+    expected_completion: Optional[str] = None,
 ) -> Optional[Verdict]:
     """
     看看畫面上有沒有擋路的對話框。回傳 None 代表一切乾淨。
+
+    expected_completion 是本任務宣告的完成對話框標題樣式（ZIP 任務為
+    config 的 zip.complete_dialog.title_like），沒有就給 None。
 
     偵測本身出錯時回傳「未知」而不是 None——寧可停機，也不要假設
     畫面是乾淨的然後繼續按下去。這是安全方向的預設。
@@ -118,4 +203,4 @@ def check_foreground(
 
     if dialog is None:
         return None
-    return match_whitelist(dialog, rules)
+    return classify(dialog, rules, expected_completion)

@@ -17,12 +17,15 @@ from typing import Iterable, Sequence, Tuple
 
 class Status(Enum):
     """
-    任務結束的七種可能。對應 design.md §4.3。
+    任務結束的八種可能。對應 design.md §4.3。
     """
 
     SUCCESS = "SUCCESS"
     SKIPPED_ALREADY_DONE = "SKIPPED_ALREADY_DONE"
     SKIPPED_NOT_FOUND = "SKIPPED_NOT_FOUND"
+    # TD-9：DCU 觸發前讀回選取，不是恰好該一個 model（例如上次的選取殘留）。
+    # 未執行，所以暫存夾沒有東西、也沒有任何檔案被動到。
+    FAILED_SELECTION = "FAILED_SELECTION"
     FAILED_TIMEOUT = "FAILED_TIMEOUT"
     FAILED_TARGET_EXISTS = "FAILED_TARGET_EXISTS"
     FAILED_MOVE = "FAILED_MOVE"
@@ -45,6 +48,9 @@ class Status(Enum):
 
         FAILED_MOVE           磁碟或權限有問題，後面的任務照樣會失敗
         HALTED_UNKNOWN_DIALOG TD-5：不確定畫面上是什麼，就絕不繼續亂按
+
+        FAILED_SELECTION 刻意不在內：它發生在觸發之前、什麼都沒動，
+        下一個 model 重選一次多半就正常，為一次選取殘留停掉整批太浪費。
         """
         return self in (Status.FAILED_MOVE, Status.HALTED_UNKNOWN_DIALOG)
 
@@ -57,6 +63,7 @@ DESCRIPTIONS = {
     Status.SUCCESS: "匯出並歸檔完成",
     Status.SKIPPED_ALREADY_DONE: "上次已完成，跳過",
     Status.SKIPPED_NOT_FOUND: "在 AccuMark Explorer 中找不到這個 model",
+    Status.FAILED_SELECTION: "DCU 選取的不是恰好這一個 model，未執行",
     Status.FAILED_TIMEOUT: "等待逾時，沒有產生檔案",
     Status.FAILED_TARGET_EXISTS: "目的地已有同名檔，為避免覆蓋而取消",
     Status.FAILED_MOVE: "歸檔搬移失敗",

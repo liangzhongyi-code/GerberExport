@@ -22,9 +22,10 @@ collection error；而在目標機上缺套件時，使用者該看到的是「�
 tests/test_static_scan.py 逐字串守護）。
 """
 
+import re
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 # ── 定位策略詞彙 ─────────────────────────────────────────────────────
 #
@@ -852,3 +853,685 @@ def list_top_windows(backend: str = BACKEND) -> Tuple[str, ...]:
         return tuple(dict.fromkeys(titles))
     except Exception:  # noqa: BLE001
         return ()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 期二操作函式（D3）：依 spec 定位、只用 UIA pattern 操作
+# ══════════════════════════════════════════════════════════════════════
+#
+# 這一段是 batch_export.py 的 UI 層會呼叫的全部東西。三條設計線：
+#
+#   1. 只碰 iface_*，不用 pywinauto 的便利方法。讀 0.6.9 原始碼會發現
+#      下拉選單的 select／collapse、選單路徑選取、Edit 的整段設文字，
+#      內部都有「pattern 不支援就改動實體滑鼠或搶前景焦點」的退路分支，
+#      而那些分支不報錯、不留紀錄。直接對 pattern 下指令就沒有退路——
+#      不支援就是拋錯，使用者的滑鼠永遠不會被碰。
+#   2. 每個失敗都翻成人看得懂的繁中訊息。UiaError 家族全是 RuntimeError，
+#      目標機上看到訊息的人是使用者，他要的是「缺哪個、下一步做什麼」，
+#      不是 COM 的 traceback。
+#   3. 定位條件是鴨子型別：任何有 .strategy 與 .value 的物件都行，
+#      config.Control 可以直接丟進來，測試也不必為了它造一個類別。
+
+STRATEGY_TITLE_RE = "title_re"
+STRATEGY_CONTROL_TYPE = "control_type"
+
+# 操作層接受的五種策略（design.md §4.1）。與 ALL_STRATEGIES 刻意分開：
+# 那個是探測報告的詞彙表，含 UNSTABLE；這個是「可以拿來定位」的集合。
+LOCATOR_STRATEGIES: Tuple[str, ...] = (
+    STRATEGY_AUTO_ID,
+    STRATEGY_NAME,
+    STRATEGY_TITLE_RE,
+    STRATEGY_CONTROL_TYPE,
+    STRATEGY_INDEX,
+)
+
+# 定位輪詢的間隔。這不是 TD-4 講的「等匯出完成」——那個要從設定檔來；
+# 這只是「視窗還在畫、控制項還沒長出來」時再問一次 UIA 的節奏。
+LOCATOR_POLL_SEC = 0.25
+
+# 展開選單後子項出現的等待上限。Win32 選單是同步的，通常幾十毫秒就有；
+# 給到 2 秒是為了慢機器與遠端桌面。
+DEFAULT_POPUP_TIMEOUT_SEC = 2.0
+
+# select_single 與 set_combo 認定為「項目」的控制項型別。三者對應
+# List／DataGrid／Tree 的子項；自繪清單的項目可能是 Custom，見 _items_of。
+ITEM_CONTROL_TYPES = ("ListItem", "DataItem", "TreeItem")
+
+# 找不到項目時，訊息裡最多列幾個現有項目——列全會把真正的錯誤淹掉。
+MAX_LISTED_ITEMS = 20
+
+
+class WindowAmbiguousError(WindowNotFoundError):
+    """
+    標題條件同時匹配到多個可見視窗。
+
+    歸在 WindowNotFoundError 底下，因為對呼叫端而言結論一樣——「沒有找到
+    唯一的目標視窗」；但訊息會列出撞到的標題，讓使用者知道該把 title_re
+    寫精確還是該關掉多餘的視窗。
+    """
+
+
+class ControlNotFoundError(UiaError):
+    """
+    依 spec 找不到子控制項。
+
+    訊息固定含三樣東西：用什麼策略、找什麼值、在哪個父控制項底下。
+    dry-run 的整個價值就是把這句話原封不動印出來——少任何一項，使用者
+    就得回頭翻 700 個節點的探測報告。三樣也留成屬性，讓 dry-run 能排表。
+    """
+
+    def __init__(self, strategy: str, value: str, parent, detail: str = ""):
+        self.strategy = strategy
+        self.value = value
+        self.parent_label = window_label(parent) if parent is not None else "(無父控制項)"
+        message = (
+            f"在「{self.parent_label}」底下找不到控制項"
+            f"（strategy={strategy}, value={value!r}）"
+        )
+        if detail:
+            message += f"。{detail}"
+        super().__init__(message)
+
+
+# ── 共用小工具 ───────────────────────────────────────────────────────
+
+
+def _spec_fields(spec) -> Tuple[str, str]:
+    """
+    從鴨子型別的 spec 取出 (strategy, value)，順便把明顯錯的擋在門口。
+
+    未知策略在這裡就拒絕，而不是在各分支默默回「找不到」：策略拼錯是
+    設定檔的問題，訊息要指向設定檔，不能偽裝成「控制項不存在」。
+    """
+    try:
+        strategy = str(spec.strategy)
+        value = str(spec.value)
+    except AttributeError as exc:
+        raise UiaError("定位條件必須是有 strategy 與 value 兩個屬性的物件") from exc
+    if strategy not in LOCATOR_STRATEGIES:
+        raise UiaError(
+            f"未知的定位策略 {strategy!r}，只接受 {list(LOCATOR_STRATEGIES)}"
+        )
+    if not value.strip():
+        raise UiaError(f"定位策略 {strategy} 的 value 不可為空")
+    return strategy, value
+
+
+def _normalize(text: str) -> str:
+    """比對項目名稱用：去頭尾空白、不分大小寫。回報時一律用原名。"""
+    return str(text).strip().casefold()
+
+
+def _name(ctrl) -> str:
+    return str(_read(lambda: ctrl.element_info.name, ""))
+
+
+def _ctype(ctrl) -> str:
+    return str(_read(lambda: ctrl.element_info.control_type, ""))
+
+
+def _first(items: Sequence[Any]):
+    return items[0] if items else None
+
+
+def _pattern(ctrl, attr: str, pattern_name: str):
+    """
+    取控制項的某個 UIA pattern 介面（iface_*），不支援就拋 UiaError。
+
+    AttributeError 也算「不支援」：只有 UIAWrapper 才有 iface_*，若有人用
+    win32 backend 抓到的控制項丟進來，該看到的訊息是「不支援這個 pattern」
+    而不是一行 AttributeError。
+    """
+    label = window_label(ctrl)
+    try:
+        return getattr(ctrl, attr)
+    except _no_pattern_error_types() + (AttributeError,) as exc:
+        raise UiaError(
+            f"控制項「{label}」不支援 {pattern_name} pattern，無法以 UIA 操作它。"
+            "請對照探測報告確認定位到的是不是正確的控制項"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 — COM 例外型別五花八門
+        raise UiaError(
+            f"取得「{label}」的 {pattern_name} pattern 失敗：{_describe_exception(exc)}"
+        ) from exc
+
+
+def _retry(func: Callable[[], Any], timeout_sec: float, retry_on: tuple):
+    """
+    在 timeout 內反覆呼叫 func，直到它不拋 retry_on 裡的例外。
+
+    timeout 為 0 就只試一次——dry-run 與測試都靠這個不空等。逾時後拋出的
+    是**最後一次的原始例外**，不是 pywinauto 的 TimeoutError：原始例外的訊息
+    才有「找什麼、在哪裡找」，TimeoutError 只有一句「逾時」。
+    """
+    if timeout_sec <= 0:
+        return func()
+    from pywinauto import timings  # noqa: PLC0415 — 刻意延遲匯入
+
+    try:
+        return timings.wait_until_passes(timeout_sec, LOCATOR_POLL_SEC, func, retry_on)
+    except timings.TimeoutError as err:
+        original = getattr(err, "original_exception", None)
+        if isinstance(original, BaseException):
+            raise original
+        raise UiaError(f"等待 {timeout_sec} 秒後仍未成功") from err
+
+
+def _wrap_element(element, backend: str):
+    """把 findwindows 回傳的 element_info 包成控制項物件（與 Desktop.windows() 同一條路）。"""
+    from pywinauto import backend as backends  # noqa: PLC0415
+
+    return backends.registry.backends[backend].generic_wrapper_class(element)
+
+
+# ── 找視窗 ───────────────────────────────────────────────────────────
+
+
+def find_window_by_spec(spec, timeout_sec: float, backend: str = BACKEND, *, process: Optional[int] = None):
+    """
+    不純：依 title_re 找唯一一個**可見**的頂層視窗，找不到拋 WindowNotFoundError。
+
+    不走既有 find_window 的 `Desktop.window().wait()`：pywinauto 0.6.9 的
+    `exists()` 會把 visible_only 強制設成 False（application.py 第 424 行），
+    於是其他虛擬桌面上、或最小化到工具列的同名視窗都會被算進去。這台開發機
+    實測 `.*記事本|.*Notepad` 因此匹配到 5 個元素而直接拋 ElementAmbiguousError
+    ——而畫面上明明只有一個記事本。目標機上只要使用者曾開過第二份 AccuMark
+    沒關乾淨，同樣的事就會發生。
+
+    所以這裡自己用 find_elements(visible_only=True) 輪詢。多於一個可見視窗
+    匹配時拋 WindowAmbiguousError 並列出標題；歧義在 timeout 內會重試，
+    因為啟動畫面（splash）與主視窗常常短暫同名。
+
+    process 可選：呼叫端知道目標的 PID 時（例如自己啟動的程序）用它縮小範圍。
+    只要求可見、不要求 enabled——主視窗被 modal 對話框蓋住時是 disabled 的，
+    dry-run 仍然要找得到它。
+    """
+    strategy, value = _spec_fields(spec)
+    if strategy != STRATEGY_TITLE_RE:
+        raise UiaError(
+            f"視窗只能用 title_re 定位，目前是 strategy={strategy!r}（value={value!r}）"
+        )
+    try:
+        re.compile(value)
+    except re.error as exc:
+        raise UiaError(f"title_re {value!r} 不是合法的正規式：{exc}") from exc
+
+    _load_pywinauto()
+    from pywinauto import findwindows  # noqa: PLC0415
+
+    criteria: Dict[str, Any] = {
+        "title_re": value,
+        "backend": backend,
+        "top_level_only": True,
+        "visible_only": True,
+        "enabled_only": False,
+    }
+    if process is not None:
+        criteria["process"] = process
+
+    def once():
+        try:
+            elements = list(findwindows.find_elements(**criteria))
+        except Exception as exc:  # noqa: BLE001
+            raise WindowNotFoundError(
+                f"搜尋標題符合 {value!r} 的視窗時出錯：{_describe_exception(exc)}。"
+                "請確認目標程式正在執行"
+            ) from exc
+        if not elements:
+            raise WindowNotFoundError(
+                f"在 {timeout_sec} 秒內找不到標題符合 {value!r} 的可見視窗。"
+                "請確認目標程式正在執行、視窗沒有最小化，且 title_re 沒有打錯"
+            )
+        if len(elements) > 1:
+            titles = [str(_read(lambda e=e: e.name, "")) for e in elements]
+            raise WindowAmbiguousError(
+                f"標題符合 {value!r} 的可見視窗不只一個（共 {len(elements)} 個）：{titles}。"
+                "請把 title_re 寫得更精確，或先關掉多餘的視窗"
+            )
+        return elements[0]
+
+    element = _retry(once, timeout_sec, (WindowNotFoundError,))
+    try:
+        return _wrap_element(element, backend)
+    except Exception as exc:  # noqa: BLE001
+        raise WindowNotFoundError(
+            f"找到標題符合 {value!r} 的視窗，但無法包成控制項：{_describe_exception(exc)}"
+        ) from exc
+
+
+# ── 找子控制項 ───────────────────────────────────────────────────────
+
+
+def _parse_index(value: str) -> Tuple[str, int]:
+    """
+    index 的 value 有兩種寫法，都要收：
+
+      "3"       第 3 個子控制項（0 起算）——任務說明的定義
+      "Edit#0"  同層第 0 個 Edit——探測報告 evaluate_locator 輸出的格式，
+                使用者是照著報告抄進 config.json 的，不收就等於報告不能用
+    """
+    text = value.strip()
+    type_name, sep, digits = text.rpartition("#")
+    if not sep:
+        type_name, digits = "", text
+    type_name = type_name.strip()
+    if not digits.strip().isdigit():
+        raise UiaError(
+            f"index 的 value 必須是整數或「ControlType#整數」（例如 \"3\" 或 \"Edit#0\"），"
+            f"目前是 {value!r}"
+        )
+    return type_name, int(digits)
+
+
+def _locate(parent, strategy: str, value: str):
+    """
+    單次定位，找不到回 None。各策略的搜尋範圍：
+
+      name / control_type / auto_id / title_re  整棵子樹，取樹序第一個
+      index                                    只看直接子節點
+
+    name 與 control_type 走 UIA 自己的 FindAll 條件（一次跨行程呼叫）；
+    auto_id 與 title_re 是 pywinauto 0.6.9 的條件建構器不支援的，只能逐
+    節點走，所以用產生器一找到就停。
+    """
+    if strategy == STRATEGY_NAME:
+        return _first(parent.descendants(title=value))
+
+    if strategy == STRATEGY_CONTROL_TYPE:
+        try:
+            return _first(parent.descendants(control_type=value))
+        except KeyError as exc:
+            raise UiaError(
+                f"未知的 ControlType {value!r}。請用探測報告裡 control_type 欄位的原字"
+            ) from exc
+
+    if strategy == STRATEGY_AUTO_ID:
+        for ctrl in parent.iter_descendants():
+            if str(_read(lambda c=ctrl: c.element_info.automation_id, "")) == value:
+                return ctrl
+        return None
+
+    if strategy == STRATEGY_TITLE_RE:
+        try:
+            regex = re.compile(value)
+        except re.error as exc:
+            raise UiaError(f"title_re {value!r} 不是合法的正規式：{exc}") from exc
+        for ctrl in parent.iter_descendants():
+            if regex.match(_name(ctrl)):
+                return ctrl
+        return None
+
+    type_name, position = _parse_index(value)
+    kids = parent.children(control_type=type_name) if type_name else parent.children()
+    return kids[position] if 0 <= position < len(kids) else None
+
+
+def resolve(parent, spec, timeout_sec: float = 0.0):
+    """
+    不純：在 parent 底下依 spec 找一個子控制項，回傳控制項物件。
+
+    control_type 的語意是「該視窗下第一個此型別的控制項」——config 預填的
+    `export_to_path: control_type=Edit` 就是靠這個，標準資料夾對話框只有一個
+    Edit。index 是「第 n 個子控制項」。
+
+    找不到拋 ControlNotFoundError。走訪途中的 COM 例外（視窗正在重畫、
+    控制項被關掉）也當成「這一次沒找到」而重試，直到 timeout；訊息會帶
+    原因，讓最後一次的失敗看得出是真的沒有還是一直讀不到。
+    """
+    strategy, value = _spec_fields(spec)
+
+    def once():
+        try:
+            found = _locate(parent, strategy, value)
+        except UiaError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise ControlNotFoundError(
+                strategy, value, parent, detail=f"走訪時出錯：{_describe_exception(exc)}"
+            ) from exc
+        if found is None:
+            raise ControlNotFoundError(strategy, value, parent)
+        return found
+
+    return _retry(once, timeout_sec, (ControlNotFoundError,))
+
+
+# ── 清單選取 ─────────────────────────────────────────────────────────
+
+
+def _items_of(container) -> List[Any]:
+    """
+    清單／下拉的「項目」。先認 ListItem／DataItem／TreeItem；整棵子樹一個
+    都沒有時退回直接子節點——自繪清單的項目型別常是 Custom，不退的話那種
+    清單永遠選不到東西，而錯誤訊息會說「沒有任何項目」，明明畫面上一排。
+    """
+    everything = _read(lambda: container.descendants(), None) or []
+    items = [c for c in everything if _ctype(c) in ITEM_CONTROL_TYPES]
+    if items:
+        return items
+    return list(_read(lambda: container.children(), None) or [])
+
+
+def _listing(names: Sequence[str]) -> str:
+    if not names:
+        return "清單目前沒有任何項目"
+    shown = list(names[:MAX_LISTED_ITEMS])
+    suffix = f"，只列前 {MAX_LISTED_ITEMS} 個" if len(names) > MAX_LISTED_ITEMS else ""
+    return f"清單目前的項目（共 {len(names)} 個{suffix}）：{shown}"
+
+
+def select_single(list_ctrl, item_name: str):
+    """
+    不純：在清單裡選取名稱等於 item_name 的那一項，回傳該項目的控制項。
+
+    比對不分大小寫、去頭尾空白（使用者從 Explorer 抄 model 名時常多一個
+    空白），但選取與回報用的都是清單裡的原名。走 SelectionItem.Select()，
+    UIA 定義它會清掉其他選取——這正是 TD-9 要的單選。
+
+    **不做讀回。** TD-9 說觸發前要讀回確認恰好一項，那要留在流程層才能被
+    整合測試看到：這裡若偷偷驗了，流程層漏掉那一步時測試照樣是綠的。
+
+    同名項目多於一個時拒絕而不是選第一個：DCU 裡兩個同名 model，隨便選
+    一個會安靜地匯出錯的那份。
+    """
+    wanted = _normalize(item_name)
+    if not wanted:
+        raise UiaError("要選取的項目名稱不可為空")
+
+    items = _items_of(list_ctrl)
+    matches = [it for it in items if _normalize(_name(it)) == wanted]
+    if not matches:
+        raise ControlNotFoundError(
+            STRATEGY_NAME, item_name, list_ctrl, detail=_listing([_name(it) for it in items])
+        )
+    if len(matches) > 1:
+        raise UiaError(
+            f"「{window_label(list_ctrl)}」裡有 {len(matches)} 個名稱等於 {item_name!r} 的項目"
+            f"（{[_name(m) for m in matches]}），無法決定要選哪一個"
+        )
+
+    item = matches[0]
+    iface = _pattern(item, "iface_selection_item", "SelectionItem")
+    try:
+        iface.Select()
+    except Exception as exc:  # noqa: BLE001
+        raise UiaError(
+            f"選取「{window_label(list_ctrl)}」裡的 {_name(item)!r} 失敗：{_describe_exception(exc)}"
+        ) from exc
+    return item
+
+
+def read_selected_names(list_ctrl) -> Tuple[str, ...]:
+    """
+    不純：清單目前選取的項目名稱，沿用 read_selection 的讀法。
+
+    讀不到是錯誤，不是空 tuple：TD-9 的讀回驗證若把「不支援 pattern」當成
+    「0 項」，任務會標成 FAILED_SELECTION，訊息卻指向選取而不是指向 pattern，
+    使用者會去重選十次而不是去查控制項。
+    """
+    probe = read_selection(list_ctrl)
+    label = window_label(list_ctrl)
+    if probe.error:
+        raise UiaError(f"讀取「{label}」的選取狀態時出錯：{probe.error}")
+    if not probe.supported:
+        raise UiaError(f"「{label}」不支援 Selection pattern，讀不到選取狀態")
+    return tuple(probe.items)
+
+
+# ── 值與文字 ─────────────────────────────────────────────────────────
+
+
+def set_value(ctrl, text: str) -> None:
+    """
+    不純：以 ValuePattern 設值，然後讀回比對；不一致拋 UiaError（RuntimeError）。
+
+    一定要讀回。SetValue 對唯讀欄位、或對「看起來像輸入框但其實是自繪」的
+    控制項，COM 常常回成功卻什麼都沒寫進去。路徑欄沒改到，匯出就寫進上
+    一次的資料夾——而且每一步都看起來成功。
+    """
+    label = window_label(ctrl)
+    iface = _pattern(ctrl, "iface_value", "Value")
+    try:
+        iface.SetValue(text)
+    except Exception as exc:  # noqa: BLE001
+        raise UiaError(
+            f"對「{label}」設值失敗：{_describe_exception(exc)}。欄位可能是唯讀的"
+        ) from exc
+    try:
+        actual = iface.CurrentValue
+    except Exception as exc:  # noqa: BLE001
+        raise UiaError(f"對「{label}」設值後讀不回目前的值：{_describe_exception(exc)}") from exc
+    actual = "" if actual is None else str(actual)
+    if actual != text:
+        raise UiaError(
+            f"對「{label}」設值後讀回不一致：期望 {text!r}，實際 {actual!r}。"
+            "欄位可能是唯讀、有格式限制，或定位到的不是真正的輸入欄"
+        )
+
+
+def read_value(ctrl) -> str:
+    """不純：讀 ValuePattern 的目前值。沒有 pattern 或讀失敗都拋 UiaError。"""
+    iface = _pattern(ctrl, "iface_value", "Value")
+    try:
+        value = iface.CurrentValue
+    except Exception as exc:  # noqa: BLE001
+        raise UiaError(f"讀取「{window_label(ctrl)}」的值失敗：{_describe_exception(exc)}") from exc
+    return "" if value is None else str(value)
+
+
+def read_text(ctrl) -> str:
+    """
+    不純：盡力讀出控制項的文字，依序試 ValuePattern → TextPattern →
+    window_text()；全失敗回空字串。DCU 的 Results 窗格是什麼控制項還不知道，
+    這裡三種都要能吃。
+
+    只在 pattern **不存在**時才退到下一個，內容是空字串就回空字串。記事本
+    實測：文字區的 window_text() 回的是控制項 Name「文字編輯器」，不是內容。
+    若空內容也往下退，Results 為空時會讀到它的標籤，完成偵測就誤判成
+    「有結果」。
+    """
+    getters: Tuple[Callable[[], Any], ...] = (
+        lambda: ctrl.iface_value.CurrentValue,
+        lambda: ctrl.iface_text.DocumentRange.GetText(-1),
+        lambda: ctrl.window_text(),
+    )
+    for getter in getters:
+        try:
+            value = getter()
+        except Exception:  # noqa: BLE001 — 沒有 pattern、COM 失敗，都是「換下一種」
+            continue
+        return "" if value is None else str(value)
+    return ""
+
+
+# ── 觸發 ─────────────────────────────────────────────────────────────
+
+
+def invoke(ctrl) -> None:
+    """不純：InvokePattern.Invoke()。按鈕、Ribbon 項目、葉節點選單項都走這個。"""
+    iface = _pattern(ctrl, "iface_invoke", "Invoke")
+    try:
+        iface.Invoke()
+    except Exception as exc:  # noqa: BLE001
+        raise UiaError(f"對「{window_label(ctrl)}」執行 Invoke 失敗：{_describe_exception(exc)}") from exc
+
+
+def _child_button(ctrl, name: str):
+    return _first(_read(lambda: ctrl.children(title=name, control_type="Button"), None) or [])
+
+
+def _expand(ctrl) -> None:
+    """
+    ExpandCollapse.Expand()。沒有這個 pattern 時退到 Invoke 子按鈕「Open」
+    ——WinForms 的下拉選單就是這樣曝光的，pywinauto 也同樣退。Invoke 不動
+    游標，所以這條退路是安全的；再沒有就拋錯，不會有第三條路。
+    """
+    label = window_label(ctrl)
+    try:
+        ctrl.iface_expand_collapse.Expand()
+        return
+    except _no_pattern_error_types() + (AttributeError,):
+        pass
+    except Exception as exc:  # noqa: BLE001
+        raise UiaError(f"展開「{label}」失敗：{_describe_exception(exc)}") from exc
+
+    button = _child_button(ctrl, "Open")
+    if button is None:
+        raise UiaError(
+            f"「{label}」不支援 ExpandCollapse pattern，也沒有 Open 按鈕，無法以 UIA 展開"
+        )
+    invoke(button)
+
+
+def _collapse(ctrl) -> None:
+    """
+    ExpandCollapse.Collapse()。沒有 pattern 就找「Close」按鈕 Invoke；連按鈕
+    都沒有的是 WinForms 的簡易下拉，它本來就永遠展開，不算失敗。
+    """
+    label = window_label(ctrl)
+    try:
+        ctrl.iface_expand_collapse.Collapse()
+        return
+    except _no_pattern_error_types() + (AttributeError,):
+        pass
+    except Exception as exc:  # noqa: BLE001
+        raise UiaError(f"收合「{label}」失敗：{_describe_exception(exc)}") from exc
+
+    button = _child_button(ctrl, "Close")
+    if button is not None:
+        invoke(button)
+
+
+def _collapse_quietly(ctrl) -> None:
+    """失敗路徑上的收尾：收不回去也不能蓋掉原本的錯誤。"""
+    try:
+        _collapse(ctrl)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _combo_text(combo) -> str:
+    """下拉目前顯示的值：先問 Selection，再問 Value。兩個都沒有才算讀不到。"""
+    try:
+        selected = combo.get_selection()
+        if selected:
+            return _element_label(selected[0])
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        value = combo.iface_value.CurrentValue
+        return "" if value is None else str(value)
+    except Exception:  # noqa: BLE001
+        pass
+    raise UiaError(
+        f"無法讀回下拉選單「{window_label(combo)}」目前的值：Selection 與 Value pattern 都讀不到"
+    )
+
+
+def set_combo(combo, item_name: str) -> str:
+    """
+    不純：把下拉選單切到 item_name。展開 → 找項目 → SelectionItem.Select →
+    收合 → 讀回確認。回傳讀回的實際文字。
+
+    讀回是 TD-9 的一部分：File Type 沒切到，AAMA 的任務會產出 ASTM 的檔，
+    檔名還是對的。找項目或選取失敗時一定把下拉收回去——留一個開著的下拉
+    在畫面上，下一步的定位會撞到它。
+    """
+    label = window_label(combo)
+    _expand(combo)
+    try:
+        select_single(combo, item_name)
+    except BaseException:
+        _collapse_quietly(combo)
+        raise
+    _collapse(combo)
+
+    actual = _combo_text(combo)
+    if _normalize(actual) != _normalize(item_name):
+        raise UiaError(
+            f"下拉選單「{label}」選取後讀回不一致：期望 {item_name!r}，實際 {actual!r}"
+        )
+    return actual
+
+
+# ── 選單 ─────────────────────────────────────────────────────────────
+
+
+def _menu_root(window, spec):
+    """
+    第一層選單項目要在 MenuBar 底下找，不在整個視窗找：視窗裡可能另有一顆
+    叫「File」的按鈕或標籤。找不到時把選單列上實際的項目列出來——語系落差
+    （File vs 檔案(F)）是 TD-10 預期最常見的失敗，這一行就能診斷。
+    """
+    strategy, value = _spec_fields(spec)
+    bars = list(_read(lambda: window.descendants(control_type="MenuBar"), None) or [])
+    for bar in bars:
+        try:
+            return resolve(bar, spec)
+        except ControlNotFoundError:
+            continue
+    if not bars:
+        raise ControlNotFoundError(
+            strategy, value, window,
+            detail="視窗裡沒有 MenuBar——V18 若是 Ribbon 介面，請改用 invoke 對 Ribbon 按鈕",
+        )
+    names = [_name(item) for bar in bars for item in (_read(lambda b=bar: b.children(), None) or [])]
+    raise ControlNotFoundError(strategy, value, window, detail=f"選單列上實際的項目：{names}")
+
+
+def _invoke_menu_item(item) -> None:
+    """
+    葉節點選單項目用 Invoke；沒有 Invoke 的試 SelectionItem（某些框架這樣
+    曝光）。兩個都沒有，多半是定位到了有子選單的那一層——它只有
+    ExpandCollapse。
+    """
+    label = window_label(item)
+    try:
+        item.iface_invoke.Invoke()
+        return
+    except _no_pattern_error_types() + (AttributeError,):
+        pass
+    except Exception as exc:  # noqa: BLE001
+        raise UiaError(f"執行選單項目「{label}」失敗：{_describe_exception(exc)}") from exc
+
+    try:
+        item.iface_selection_item.Select()
+    except _no_pattern_error_types() + (AttributeError,) as exc:
+        raise UiaError(
+            f"選單項目「{label}」既沒有 Invoke 也沒有 SelectionItem pattern，無法以 UIA 觸發。"
+            "它可能是有子選單的那一層（要再往下一層），或者這其實是 Ribbon"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise UiaError(f"執行選單項目「{label}」失敗：{_describe_exception(exc)}") from exc
+
+
+def menu_invoke(window, specs: Iterable[Any], *, popup_timeout_sec: float = DEFAULT_POPUP_TIMEOUT_SEC) -> None:
+    """
+    不純：沿 MenuBar → MenuItem 逐層 ExpandCollapse.Expand()，最後一層 Invoke。
+    specs 是由外而內的定位條件序列，例如 [name=File, name=Export Zip]。
+
+    **這是全模組唯一會短暫影響鍵盤焦點的動作。** Win32 選單展開期間，系統
+    會讓選單取得鍵盤焦點（幾百毫秒，Invoke 後立刻歸還），實體游標不動。
+    這是 Explorer 的 Export Zip 目前唯一已知的觸發方式，所以保留；若
+    dry-run 發現 V18 Explorer 是 Ribbon（沒有 MenuBar），應改用 invoke 對
+    Ribbon 按鈕——那條路連這幾百毫秒都沒有。
+
+    任何一層失敗，已展開的選單會反向逐層收回：留一個開著的選單在畫面上，
+    使用者會以為是自己誤點的，而下一個任務的定位會撞到它。
+    """
+    path = tuple(specs)
+    if not path:
+        raise UiaError("menu_invoke 至少要給一層選單項目")
+
+    opened: List[Any] = []
+    try:
+        current = _menu_root(window, path[0])
+        for spec in path[1:]:
+            _expand(current)
+            opened.append(current)
+            current = resolve(current, spec, timeout_sec=popup_timeout_sec)
+        _invoke_menu_item(current)
+    except BaseException:
+        for item in reversed(opened):
+            _collapse_quietly(item)
+        raise

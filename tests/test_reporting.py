@@ -40,12 +40,13 @@ def text_of(lines):
 
 
 def test_every_status_in_design_doc_exists():
-    """design.md §4.3 列了八種狀態，少一種就代表某條路徑無處可歸。"""
+    """design.md §4.3 列了九種狀態，少一種就代表某條路徑無處可歸。"""
     expected = {
         "SUCCESS",
         "SKIPPED_ALREADY_DONE",
         "SKIPPED_NOT_FOUND",
         "FAILED_SELECTION",
+        "FAILED_UI",
         "FAILED_TIMEOUT",
         "FAILED_TARGET_EXISTS",
         "FAILED_MOVE",

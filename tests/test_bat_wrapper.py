@@ -27,6 +27,7 @@ DIALOG_LABELS = {
 BAT_TARGETS = {
     "0_檢查環境.bat": "check_env.py",
     "1_執行探測.bat": "probe_ui.py",
+    "2e_確認控制項.bat": "batch_export.py",
     "3_執行批次匯出.bat": "batch_export.py",
     "4_強制全部重跑.bat": "batch_export.py",
 }

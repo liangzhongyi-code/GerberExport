@@ -64,6 +64,11 @@ The system SHALL 對清單中的每個 model，各執行一次 Explorer 的 Expo
 - **WHEN** 觸發前讀回選取狀態
 - **THEN** 讀到恰好一項且名稱等於該 model，腳本才按執行鈕
 
+#### Scenario: 控制項定位不到
+- **GIVEN** 介面語系與設定檔預填的名稱不同（例如選單顯示「檔案」而非 `File`）
+- **WHEN** 腳本嘗試觸發該任務
+- **THEN** 任務標記為 `FAILED_UI`，訊息指出是哪一個控制項、用什麼條件找的；腳本繼續下一個任務，MUST NOT 中止整批
+
 #### Scenario: DCU 選取殘留多項
 - **GIVEN** 讀回選取狀態顯示不只一項（例如上一次的選取仍亮著），或唯一一項不是該 model
 - **WHEN** 腳本準備觸發

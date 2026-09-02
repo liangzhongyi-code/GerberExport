@@ -72,6 +72,7 @@ def valid_dict():
                 "export_to_dialog": {"strategy": "title_re", "value": "Export To.*"},
                 "export_to_path": {"strategy": "control_type", "value": "Edit"},
                 "export_to_ok": {"strategy": "name", "value": "OK"},
+                "export_screen": {"strategy": "title_re", "value": "Export.*"},
                 "export_screen_ok": {"strategy": "name", "value": "OK"},
             },
             "dcu": {
@@ -723,6 +724,7 @@ def test_control_group_sets_match_design():
         "export_to_dialog",
         "export_to_path",
         "export_to_ok",
+        "export_screen",
         "export_screen_ok",
     )
     assert cfg.DCU_CONTROLS == (

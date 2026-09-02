@@ -855,6 +855,45 @@ def list_top_windows(backend: str = BACKEND) -> Tuple[str, ...]:
         return ()
 
 
+def popup_windows(windows: Sequence[Any], backend: str = BACKEND) -> Tuple[Any, ...]:
+    """
+    不純：AccuMark 自己彈出來的視窗——同 process、但不是那幾個主視窗。
+
+    守衛只能看這些。使用者的核心需求是「一邊跑批次一邊用同一台電腦做別的
+    事」，所以「前景視窗不是 AccuMark」是**正常狀態**，不是異常：拿前景
+    視窗當偵測對象的話，他切去瀏覽器打字就會把整批停掉。
+
+    反過來，模態對話框在使用者切走之後仍然擋著 AccuMark，只是不在前景。
+    照 process 找才看得到它。
+
+    失敗回空 tuple：守衛讀不到畫面時，讓等待迴圈自然走到逾時，比拋例外
+    炸掉整批安全。
+    """
+    try:
+        pywinauto = _load_pywinauto()
+        known = set()
+        pids = []
+        for w in windows:
+            info = getattr(w, "element_info", None)
+            handle = getattr(info, "handle", None)
+            pid = getattr(info, "process_id", None)
+            if handle is not None:
+                known.add(handle)
+            if pid is not None and pid not in pids:
+                pids.append(pid)
+
+        found = []
+        for pid in pids:
+            for w in pywinauto.Desktop(backend=backend).windows(process=pid, visible_only=True):
+                handle = getattr(w.element_info, "handle", None)
+                if handle is not None and handle not in known:
+                    known.add(handle)  # 兩個主視窗同 process 時不重複列
+                    found.append(w)
+        return tuple(found)
+    except Exception:  # noqa: BLE001
+        return ()
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 期二操作函式（D3）：依 spec 定位、只用 UIA pattern 操作
 # ══════════════════════════════════════════════════════════════════════
@@ -1259,6 +1298,39 @@ def select_single(list_ctrl, item_name: str):
             f"選取「{window_label(list_ctrl)}」裡的 {_name(item)!r} 失敗：{_describe_exception(exc)}"
         ) from exc
     return item
+
+
+def list_item_names(list_ctrl) -> Tuple[str, ...]:
+    """
+    不純：清單裡所有項目的名稱。
+
+    用來回答「這個 model 在不在清單裡」——沒有它，找不到的 model 會走到
+    select_single 才失敗，那時訊息指向「選取失敗」而不是「根本沒有這個
+    model」，使用者會去查選取而不是去查名字。
+    """
+    return tuple(_name(it) for it in _items_of(list_ctrl))
+
+
+def window_title(ctrl) -> Optional[str]:
+    """
+    不純：視窗標題原文，讀不到回 None。
+
+    刻意不把讀不到轉成空字串：dialog_guard 對 None 與 "" 的處理一樣安全，
+    但日誌上「(無標題)」與「標題是空字串」是不同的線索。
+    """
+    text = _read(lambda: ctrl.window_text(), None)
+    return None if text is None else str(text)
+
+
+def button_names(ctrl) -> Tuple[str, ...]:
+    """
+    不純：這個視窗上所有按鈕的文字。
+
+    停機時要把它們寫進日誌——那正是使用者擴充白名單所需要的資訊（TD-5）。
+    讀不到就回空 tuple，這是輔助資訊，不該讓停機路徑掛掉。
+    """
+    buttons = _read(lambda: ctrl.descendants(control_type="Button"), None) or []
+    return tuple(_name(b) for b in buttons)
 
 
 def read_selected_names(list_ctrl) -> Tuple[str, ...]:

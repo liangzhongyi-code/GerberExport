@@ -601,6 +601,7 @@ TD-2 的流程是「探測 → 人讀 700 節點的樹 → 填 config → 送回
 | `SKIPPED_ALREADY_DONE` | 續跑時跳過 | 否 |
 | `SKIPPED_NOT_FOUND` | model 在 Explorer／DCU 清單中不存在 | 否 |
 | `FAILED_SELECTION` | DCU 讀回選取不是恰好該一個 model（例如上次的選取殘留）；**未執行** | 否 |
+| `FAILED_UI` | 控制項定位不到、設值被拒、選單展不開 | 否 |
 | `FAILED_TIMEOUT` | 完成訊號未到或檔案未齊；殘留搬至 `_逾時殘留\` | 否 |
 | `FAILED_TARGET_EXISTS` | 白名單對話框判定為覆蓋風險 | 否 |
 | `FAILED_MOVE` | 歸檔搬移失敗（磁碟／權限） | **是** |
@@ -789,3 +790,4 @@ accumark-batch-export\
 | 2026-08-30 | 設計核准。依使用者要求新增「全部包成 `.bat` 純雙擊」→ 新增 TD-7、`operability` 兩條 Requirement（7 個 Scenario）。Scenario 總數 25 → 32 |
 | 2026-08-30 | **TD-1 翻轉**：使用者確認目標機已有 Python → 技術棧由 PowerShell 改為 Python + pywinauto，PowerShell 降為退路。新增期零任務 A0（相依驗證）與離線 wheel 預案。連帶更新 §2 元件表與流程、§4 設定 schema、§6 技術棧與目錄、§9 測試策略（Pester → pytest）、TD-7 的 `.bat` 骨架。<br>**新增 TD-8**：歸檔改為保留原檔名、僅衝突時改名。<br>**新增 `models: "SELECTED"`**：免維護 model 清單，改讀 Explorer 選取項。<br>交付物新增「完整使用手冊」。 |
 | 2026-09-02 | **期二設計改版**。查得官方文件（Export Zip 結束跳「Process Complete」；DCU 為表單）、使用者確認 DXF 走 DCU、且**多選會把裁片併進同一個 DXF** → 新增 **TD-9**（DXF 逐 model 逐格式、觸發前讀回選取恰好一項）、**TD-10**（預填 `controls` + `--dry-run`）；**TD-4 修訂**為 UI 訊號為主、檔案穩定為輔；§2.1／§2.3／§4／§12 更新。`config` 新增 `expected_outputs`／`zip`／`dxf`／巢狀 `controls`（explorer／dcu）、`quiet_period_sec`，策略新增 `title_re`／`control_type`，移除 `verify_exclusive_lock`；狀態新增 `FAILED_SELECTION`；逾時殘留改搬至 `_逾時殘留\` 不刪。兩個待拍板決定（續跑資料夾、state 落點）定案。Spec：batch-export 重寫「每個任務恰含一個 model」「完成偵測」、新增「`--dry-run`」；file-archival 新增主檔名防線兩條。tasks.md 階段 D 重排為 D0–D6，不再以探測報告為開工前提。 |
+| 2026-09-02 | **D4 實作**。新增 `FAILED_UI`（§4.3）：控制項定位不到、設值被拒、選單展不開——原本八種狀態沒有一種涵蓋它，而那是語系落差與 AccuMark 升級時最可能發生的失敗。刻意不中止整批：「ZIP 都好、DXF 全壞」直接指向 DCU 那半邊的設定，中止在第一個就看不出這件事。`controls.explorer` 新增 `export_screen`——官方文件說 Export Zip 是「先選資料夾、再出現匯出畫面」兩個視窗，原 schema 只有後者的 OK 鈕、沒有它本身，定位不到。新增模組：`orchestrator`（純編排，可完整測試）、`ops`（UIA 操作，目標機驗收）、`dryrun`（只收兩個查詢函式，結構上不可能操作介面）。 |

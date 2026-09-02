@@ -130,29 +130,68 @@ def _spec(strategy, value):
     return SimpleNamespace(strategy=strategy, value=value)
 
 
-@contextlib.contextmanager
-def _notepad():
-    """
-    啟動一個乾淨的記事本，離開時一律 kill。
+# 記事本本身開得很快，但等視窗被 UIA 看見要另外算。這個數字只影響
+# 「失敗要等多久」，不影響成功時的速度。
+NOTEPAD_WAIT_SEC = 30
 
+# 整檔共用一個 process。
+#
+# 原本每條測試各開一個，整檔連續啟動、砍掉三十幾個 process——實測會偶發
+# 「30 秒等不到視窗」，而單獨跑同一條只要 1.3 秒。那不是程式的問題，是
+# 系統回收跟不上；但偶發的紅燈會讓人開始不信任這組測試，那比什麼都糟。
+#
+# 共用之後啟動次數從 30+ 降到 1。代價是內容會殘留，所以每次進入前把
+# 文字區清空——否則前一條測試寫進去的字會讓「空內容」的斷言失敗。
+_SHARED = {"proc": None}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _kill_shared_notepad():
+    """整檔跑完才收掉共用的那一個。"""
+    yield
+    proc = _SHARED.pop("proc", None)
+    if proc is not None and proc.poll() is None:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def _spawn_notepad():
+    """
     kill 而不是關視窗：文字區被 SetValue 過之後，正常關閉會跳「要儲存嗎」
     對話框，而那個對話框只能靠實體輸入或 Invoke 按鈕才關得掉——兩者都是
     這組測試不該做的事。TerminateProcess 沒有這個問題。
     """
+    return subprocess.Popen(["notepad.exe"])
+
+
+@contextlib.contextmanager
+def _notepad():
+    """共用的那一個，內容已清空。"""
     _needs_pywinauto()
-    proc = subprocess.Popen(["notepad.exe"])
+    proc = _SHARED.get("proc")
+    if proc is None or proc.poll() is not None:
+        proc = _spawn_notepad()
+        _SHARED["proc"] = proc
+    win = _open_notepad(proc)
+    # 用被測的 set_value 來清空：它若壞了，失敗會出現在這裡而不是斷言上，
+    # 但訊息一樣指向 set_value，不會誤導。
+    uia.set_value(_edit_of(win), "")
+    yield proc
+
+
+@contextlib.contextmanager
+def _extra_notepad():
+    """
+    另外開一個、用完就收。只有「兩個視窗造成歧義」那條測試需要——
+    它要的正是「同時存在兩個符合條件的視窗」。
+    """
+    _needs_pywinauto()
+    proc = _spawn_notepad()
     try:
         yield proc
     finally:
         proc.kill()
         proc.wait(timeout=10)
-
-
-# 記事本本身開得很快，但這一整檔會連續啟動、砍掉二十幾個 process，其中一條
-# 測試還同時開兩個。實測在那條之後偶爾會超過 10 秒才等到視窗——系統仍在回收
-# 前一批 process。這個數字只影響「失敗要等多久」，不影響成功時的速度，所以
-# 寧可放寬：偶發的紅燈會讓人開始不信任這組測試，那比多等幾秒糟得多。
-NOTEPAD_WAIT_SEC = 30
 
 
 def _open_notepad(proc):
@@ -205,7 +244,7 @@ def test_find_window_by_spec_reports_ambiguity_with_titles():
     的視窗」，要走 WindowNotFoundError 這條路，但訊息必須列出撞到的標題，
     否則使用者只會看到一句「找不到」而視窗明明就在眼前。
     """
-    with _notepad() as first, _notepad() as second:
+    with _notepad() as first, _extra_notepad() as second:
         _open_notepad(first)
         _open_notepad(second)
         with pytest.raises(uia.WindowNotFoundError) as exc:

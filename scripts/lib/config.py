@@ -60,6 +60,7 @@ EXPLORER_CONTROLS: Tuple[str, ...] = (
     "export_to_dialog",
     "export_to_path",
     "export_to_ok",
+    "export_screen",
     "export_screen_ok",
 )
 DCU_CONTROLS: Tuple[str, ...] = (

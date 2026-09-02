@@ -26,6 +26,9 @@ class Status(Enum):
     # TD-9：DCU 觸發前讀回選取，不是恰好該一個 model（例如上次的選取殘留）。
     # 未執行，所以暫存夾沒有東西、也沒有任何檔案被動到。
     FAILED_SELECTION = "FAILED_SELECTION"
+    # 控制項定位不到、SetValue 被拒、選單展不開。多半是語系落差或 AccuMark
+    # 升級改了介面——設定檔改一改就能解決，不是資料出了問題。
+    FAILED_UI = "FAILED_UI"
     FAILED_TIMEOUT = "FAILED_TIMEOUT"
     FAILED_TARGET_EXISTS = "FAILED_TARGET_EXISTS"
     FAILED_MOVE = "FAILED_MOVE"
@@ -51,6 +54,10 @@ class Status(Enum):
 
         FAILED_SELECTION 刻意不在內：它發生在觸發之前、什麼都沒動，
         下一個 model 重選一次多半就正常，為一次選取殘留停掉整批太浪費。
+
+        FAILED_UI 也不在內：定位失敗多半整批都會失敗，但**一次看到全部**
+        比一次看到一個有用得多——「ZIP 都好、DXF 全壞」直接指向 DCU 那半
+        邊的設定，中止在第一個就看不出這件事。
         """
         return self in (Status.FAILED_MOVE, Status.HALTED_UNKNOWN_DIALOG)
 
@@ -64,6 +71,7 @@ DESCRIPTIONS = {
     Status.SKIPPED_ALREADY_DONE: "上次已完成，跳過",
     Status.SKIPPED_NOT_FOUND: "在 AccuMark Explorer 中找不到這個 model",
     Status.FAILED_SELECTION: "DCU 選取的不是恰好這一個 model，未執行",
+    Status.FAILED_UI: "找不到或操作不了介面上的控制項",
     Status.FAILED_TIMEOUT: "等待逾時，沒有產生檔案",
     Status.FAILED_TARGET_EXISTS: "目的地已有同名檔，為避免覆蓋而取消",
     Status.FAILED_MOVE: "歸檔搬移失敗",

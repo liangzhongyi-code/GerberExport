@@ -105,6 +105,69 @@ def check_controls(
     return tuple(out)
 
 
+# ── 選取狀態 ─────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class SelectionCheck:
+    """
+    Explorer 的 model 清單能不能讀出「使用者框選了哪些」。
+
+    這決定了日常操作的形狀：讀得到就是「框選再雙擊」，設定檔完全不用碰；
+    讀不到就得在 config.json 裡列出 model 名稱，換 model 時要編輯檔案。
+
+    刻意跟 CheckResult 分開：控制項找不找得到是「設定對不對」，這一項是
+    「能用哪一種用法」——後者讀不到並不代表有東西壞掉。
+    """
+
+    supported: bool
+    items: Tuple[str, ...] = ()
+    error: str = ""
+
+
+def check_selection(list_ctrl, read_fn: Callable[[Any], Any]) -> SelectionCheck:
+    """
+    問清單一次「你目前選了哪些」。
+
+    read_fn 回傳的東西要有 supported／items／error 三個屬性（uia.read_selection
+    就是這個形狀）。它自己炸掉也不讓 dry-run 失敗——這是輔助資訊。
+    """
+    try:
+        probe = read_fn(list_ctrl)
+    except Exception as exc:  # noqa: BLE001
+        return SelectionCheck(supported=False, error=str(exc))
+    return SelectionCheck(
+        supported=bool(getattr(probe, "supported", False)),
+        items=tuple(getattr(probe, "items", ()) or ()),
+        error=str(getattr(probe, "error", "") or ""),
+    )
+
+
+def format_selection(check: SelectionCheck) -> list:
+    """三種結論，三種下一步。"""
+    lines = ["", "model 清單能不能讀出「你框選了哪些」", "-" * 56]
+
+    if check.supported and check.items:
+        shown = "、".join(check.items[:5]) + ("…" if len(check.items) > 5 else "")
+        lines.append(f"  [OK]  可以讀取，目前選了 {len(check.items)} 項：{shown}")
+        lines.append("        以後在 Explorer 框選要處理的 model 再雙擊就好，")
+        lines.append("        設定檔完全不用改。")
+        return lines
+
+    if check.supported:
+        lines.append("  [OK]  可以讀取，但你現在沒有框選任何項目。")
+        lines.append("        功能是可用的——跑批次前記得先在 Explorer 框選。")
+        return lines
+
+    lines.append("  [缺]  讀不到選取狀態。")
+    if check.error:
+        lines.append(f"        原因：{check.error}")
+    lines.append("        這不是壞掉，只是要換一種用法：在 config.json 的")
+    lines.append('        models 欄位填明確清單，例如 ["A-1234", "A-1235"]，')
+    lines.append("        換 model 時編輯那一行。把這個畫面回報給我，我幫你填。")
+    return lines
+
+
 def missing(results: Sequence[CheckResult]) -> Tuple[CheckResult, ...]:
     """真的查過、但找不到的。這些才是要改設定的項目。"""
     return tuple(r for r in results if r.checked and not r.found)

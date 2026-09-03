@@ -240,6 +240,91 @@ def test_everything_missing_tells_how_to_find_the_real_titles():
 # ── 結構保證 ─────────────────────────────────────────────────────────
 
 
+# ── 選取狀態：決定要不要每次手動維護清單 ─────────────────────────────
+#
+# 「在 Explorer 框選幾個 model，雙擊就跑」這件事能不能成立，取決於
+# AccuMark 的清單控制項有沒有把「目前選了哪些」對外曝光。那是 UIA 的
+# SelectionPattern，只有在真機上問過才知道。
+#
+# 原本 dry-run 只檢查 model_list「找不找得到」——找得到不代表讀得到選取。
+# 少了這一問，對方會在 2e 全綠之後跑批次，才在啟動檢查那裡撞到，然後
+# 得再跑一趟。dry-run 的價值就是一次問完。
+
+
+class FakeProbe:
+    def __init__(self, supported, items=(), error=None):
+        self.supported = supported
+        self.items = tuple(items)
+        self.error = error
+
+
+def test_selection_readable_with_items():
+    check = dryrun.check_selection(object(), lambda c: FakeProbe(True, ("A-1234", "A-1235")))
+    assert check.supported is True
+    assert check.items == ("A-1234", "A-1235")
+    body = "\n".join(dryrun.format_selection(check))
+    assert "A-1234" in body
+    assert "不用" in body or "免" in body
+
+
+def test_selection_supported_but_nothing_chosen():
+    """
+    三種結論要有三種說法：有選、支援但沒選、不支援。
+
+    斷言刻意避開「框選」二字——「有選」那一段也含它，用 or 串起來的話，
+    把兩個分支合併掉測試照樣是綠的（突變檢查抓到過一次）。改成釘住那句
+    怪訊息不能出現：沒選就是沒選，不是「選了 0 項」。
+    """
+    check = dryrun.check_selection(object(), lambda c: FakeProbe(True, ()))
+    assert check.supported is True
+    body = "\n".join(dryrun.format_selection(check))
+    assert "0 項" not in body, "「沒有選取」不該說成「選了 0 項」"
+    assert "沒有" in body
+    assert "明確清單" not in body, "支援卻叫人改設定檔，那是把可用的功能講成壞掉"
+
+
+def test_the_three_selection_verdicts_read_differently():
+    """三種結論的下一步不同，文字就不能長得一樣。"""
+    chosen = "\n".join(dryrun.format_selection(dryrun.SelectionCheck(True, ("A-1234",))))
+    empty = "\n".join(dryrun.format_selection(dryrun.SelectionCheck(True, ())))
+    unsupported = "\n".join(dryrun.format_selection(dryrun.SelectionCheck(False)))
+    assert len({chosen, empty, unsupported}) == 3
+
+
+def test_selection_not_supported_points_at_the_explicit_list():
+    """讀不到就得退回明確清單——那是使用者要知道的替代方案，不是死路。"""
+    check = dryrun.check_selection(object(), lambda c: FakeProbe(False))
+    assert check.supported is False
+    body = "\n".join(dryrun.format_selection(check))
+    assert "明確清單" in body
+    assert "models" in body
+
+
+def test_selection_probe_error_is_reported_not_swallowed():
+    check = dryrun.check_selection(object(), lambda c: FakeProbe(False, error="COM 錯誤 0x80004005"))
+    assert "0x80004005" in "\n".join(dryrun.format_selection(check))
+
+
+def test_selection_check_survives_a_throwing_probe():
+    """這是輔助資訊，它自己壞掉不該讓整個 dry-run 失敗。"""
+
+    def boom(ctrl):
+        raise RuntimeError("讀取時炸了")
+
+    check = dryrun.check_selection(object(), boom)
+    assert check.supported is False
+    assert "讀取時炸了" in "\n".join(dryrun.format_selection(check))
+
+
+def test_selection_result_does_not_change_the_exit_code():
+    """
+    讀不到選取狀態不是「設定壞了」，是「要換一種用法」。把它算進失敗會讓
+    使用者以為還有東西要修，而其實只要改 models 欄位就能開始跑。
+    """
+    results, _ = run()
+    assert dryrun.exit_code(results) == 0
+
+
 def test_check_controls_needs_nothing_but_two_lookups():
     """
     「絕不操作介面」不是靠自律，是靠介面：check_controls 收不到任何

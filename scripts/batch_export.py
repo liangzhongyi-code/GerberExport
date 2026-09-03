@@ -155,6 +155,28 @@ def run_dry(config, echo) -> int:
     )
     for line in dryrun.format_results(results):
         echo(line)
+
+    # 控制項找得到，不代表讀得出「使用者框選了哪些」——那是另一個 pattern，
+    # 而它決定日常操作的形狀（框選再雙擊 vs 每次編輯設定檔）。
+    # 少了這一問，使用者會在 2e 全綠之後跑批次才撞到，然後得再跑一趟。
+    model_list = next(
+        (r for r in results if r.group == "explorer" and r.name == "model_list" and r.found),
+        None,
+    )
+    if model_list is not None:
+        try:
+            window = uia.find_window_by_spec(
+                config.controls.explorer["window"], timeout_sec=5.0
+            )
+            ctrl = uia.resolve(window, config.controls.explorer["model_list"], 1.0)
+            for line in dryrun.format_selection(
+                dryrun.check_selection(ctrl, uia.read_selection)
+            ):
+                echo(line)
+        except Exception as exc:  # noqa: BLE001 — 輔助資訊，壞掉不影響上面的結論
+            echo("")
+            echo(f"（順帶一提：想確認選取狀態時出了狀況——{exc}）")
+
     return dryrun.exit_code(results)
 
 

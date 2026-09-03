@@ -68,7 +68,12 @@
   ],
 
   "controls": {
-    "_說明": "AccuMark 介面上各個控制項怎麼找。目前是照官方文件的英文名稱預填，先跑 dry-run 看哪幾個找不到，再只改那幾個。strategy 可用：name（畫面上顯示的文字）、auto_id（探測報告裡的 automation_id）、title_re（視窗標題的正規表示式，任意文字寫 .*，只給 window 用）、control_type（該視窗裡第一個這種型別的控制項）、index（探測報告裡的序號，value 要填數字）。什麼時候要改：介面是中文（File 會變成「檔案」）、AccuMark 升級、或 dry-run 說找不到。",
+    "_適用環境": "這份 controls 是照哪一台驗證出來的。換機器時先確認這三項一樣，一樣就直接複製這個檔案過去，不一樣就跑一次 2e_確認控制項.bat。AccuMark 有中英文版，介面語言不同時選單名稱會整批對不上。",
+  "_適用_AccuMark版本": "尚未驗證",
+  "_適用_介面語言": "尚未驗證（預填的是官方文件的英文名稱）",
+  "_驗證日期": "尚未驗證",
+
+  "_說明": "AccuMark 介面上各個控制項怎麼找。目前是照官方文件的英文名稱預填，先跑 dry-run 看哪幾個找不到，再只改那幾個。strategy 可用：name（畫面上顯示的文字）、auto_id（探測報告裡的 automation_id）、title_re（視窗標題的正規表示式，任意文字寫 .*，只給 window 用）、control_type（該視窗裡第一個這種型別的控制項）、index（探測報告裡的序號，value 要填數字）。什麼時候要改：介面是中文（File 會變成「檔案」）、AccuMark 升級、或 dry-run 說找不到。",
     "explorer": {
       "_說明": "AccuMark Explorer 這一半，ZIP 任務用。window 是主視窗標題；model_list 是 model 清單；menu_file / menu_export_zip 是 File 選單與底下的 Export Zip；export_to_dialog 是接著跳出的「Export To」資料夾對話框，export_to_path 是裡面的路徑欄、export_to_ok 是它的 OK；export_screen 是接著出現的匯出畫面（列出要匯出的項目與元件選項），export_screen_ok 是它的 OK。官方文件說這是兩個視窗，dry-run 會確認實際長相。",
       "window":           { "strategy": "title_re",     "value": "AccuMark Explorer.*" },

@@ -209,6 +209,34 @@ def test_everything_missing_also_offers_the_boring_explanation():
     assert body.index("沒開") < body.index("自繪")
 
 
+def test_everything_missing_mentions_the_language_possibility():
+    """
+    AccuMark 有中文版介面。中文版連視窗標題都可能不是 `AccuMark Explorer`，
+    於是兩個視窗都找不到、底下全部未檢查——外觀與「介面自繪」完全一樣。
+
+    但兩者的下一步天差地遠：語系只要改設定檔的十幾行字，自繪則是整個方案
+    要換做法。漏掉語系這個可能，使用者會以為方案沒救而放棄，實際上五分鐘
+    就能解決。
+    """
+    results, _ = run(missing_windows=("AccuMark Explorer.*", "Data Conversion.*"))
+    body = "\n".join(dryrun.format_results(results))
+    assert "語系" in body or "中文" in body
+    # 語系比自繪常見，要排在前面
+    idx_lang = body.index("語系") if "語系" in body else body.index("中文")
+    assert idx_lang < body.index("自繪")
+
+
+def test_everything_missing_tells_how_to_find_the_real_titles():
+    """
+    語系不同時，使用者需要知道「正確的視窗標題是什麼」——而那正是
+    1_執行探測.bat 會列出來的東西。不指路的話，他只能回報「全都找不到」，
+    然後我們再來回問一次。
+    """
+    results, _ = run(missing_windows=("AccuMark Explorer.*", "Data Conversion.*"))
+    body = "\n".join(dryrun.format_results(results))
+    assert "1_執行探測" in body
+
+
 # ── 結構保證 ─────────────────────────────────────────────────────────
 
 
